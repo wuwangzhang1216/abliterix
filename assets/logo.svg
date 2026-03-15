@@ -1,0 +1,60 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="460" height="120" viewBox="0 0 460 120" fill="none">
+  <defs>
+    <linearGradient id="fg" x1="0.5" y1="1" x2="0.5" y2="0">
+      <stop offset="0%" stop-color="#BF360C"/>
+      <stop offset="30%" stop-color="#E65100"/>
+      <stop offset="65%" stop-color="#FF6D00"/>
+      <stop offset="100%" stop-color="#FFB300"/>
+    </linearGradient>
+    <linearGradient id="ig" x1="0.5" y1="1" x2="0.5" y2="0">
+      <stop offset="0%" stop-color="#FF8F00"/>
+      <stop offset="60%" stop-color="#FFC107"/>
+      <stop offset="100%" stop-color="#FFE082"/>
+    </linearGradient>
+  </defs>
+
+  <style>
+    .title { font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; fill: #181818; }
+    .sub   { font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; fill: #6b7280; }
+    @media (prefers-color-scheme: dark) {
+      .title { fill: #f0f0f0; }
+      .sub   { fill: #9ca3af; }
+    }
+  </style>
+
+  <!-- Outer flame -->
+  <path d="
+    M 44 108
+    C 28 90, 4 66, 12 40
+    C 16 26, 26 14, 36 6
+    C 34 18, 35 26, 38 30
+    C 41 22, 44 12, 50 4
+    C 60 16, 74 32, 76 46
+    C 80 66, 60 90, 44 108 Z"
+    fill="url(#fg)"/>
+
+  <!-- Inner flame -->
+  <path d="
+    M 44 108
+    C 36 92, 22 74, 27 56
+    C 30 46, 36 36, 44 26
+    C 52 36, 58 46, 61 56
+    C 66 74, 52 92, 44 108 Z"
+    fill="url(#ig)"/>
+
+  <!-- AI: three connected nodes (minimal neural net) -->
+  <g stroke="#FFF8E1" stroke-width="1.5" stroke-opacity="0.85" stroke-linecap="round">
+    <line x1="34" y1="72" x2="54" y2="72"/>
+    <line x1="34" y1="72" x2="44" y2="48"/>
+    <line x1="54" y1="72" x2="44" y2="48"/>
+  </g>
+  <circle cx="34" cy="72" r="3.5" fill="#FFF8E1" fill-opacity="0.9"/>
+  <circle cx="54" cy="72" r="3.5" fill="#FFF8E1" fill-opacity="0.9"/>
+  <circle cx="44" cy="48" r="3.5" fill="#FFF8E1" fill-opacity="0.9"/>
+
+  <!-- Title -->
+  <text x="100" y="62" class="title" font-size="46" font-weight="800" letter-spacing="2">PROMETHEUS</text>
+
+  <!-- Subtitle -->
+  <text x="102" y="86" class="sub" font-size="12.5" font-weight="400" letter-spacing="4">AUTOMATED LLM ABLITERATION</text>
+</svg>
