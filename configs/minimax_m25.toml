@@ -1,0 +1,69 @@
+# MiniMax-M2.5 (229B MoE) steering config
+# Architecture: minimax_m2, 62 layers, hidden=3072, 256 experts, 8 per token
+# No shared expert (unlike Qwen3.5), uses block_sparse_moe naming (like Phi-3.5-MoE)
+# Weights stored as FP8 (float8_e4m3fn) on HF — load natively, ~229GB
+# Needs 3x RTX PRO 6000 (294GB) with device_map="auto"
+
+[model]
+dtype_fallback_order = ["auto"]
+quant_method = "none"
+use_torch_compile = false
+device_map = "auto"
+trust_remote_code = false
+
+[inference]
+batch_size = 0
+max_batch_size = 4
+max_gen_tokens = 50
+
+[steering]
+vector_method = "mean"
+decay_kernel = "linear"
+orthogonal_projection = true
+weight_normalization = "none"
+# MoE weight range (no shared expert — wider range may help)
+strength_range = [1.0, 10.0]
+
+[optimization]
+num_trials = 25
+num_warmup_trials = 10
+checkpoint_dir = "checkpoints_minimax_m25"
+
+[kl]
+scale = 1.0
+token_count = 3
+target = 0.01
+prune_threshold = 5.0
+
+[detection]
+llm_judge = true
+llm_judge_model = "google/gemini-3.1-flash-lite-preview"
+llm_judge_batch_size = 10
+llm_judge_concurrency = 10
+
+[display]
+print_responses = false
+print_residual_geometry = false
+plot_residuals = false
+
+non_interactive = true
+
+[benign_prompts]
+dataset = "datasets/good_1000"
+split = "train[:800]"
+column = "prompt"
+
+[target_prompts]
+dataset = "datasets/harmful_1000"
+split = "train[:800]"
+column = "prompt"
+
+[benign_eval_prompts]
+dataset = "datasets/good_1000"
+split = "train[800:]"
+column = "prompt"
+
+[target_eval_prompts]
+dataset = "datasets/harmful_1000"
+split = "train[800:]"
+column = "prompt"

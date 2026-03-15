@@ -1,0 +1,65 @@
+# Qwen3.5-27B (dense) steering config
+# 27B params, 64 layers, hidden=5120, intermediate=17408
+# BF16: ~54GB — single A100-80GB
+
+[model]
+dtype_fallback_order = ["bfloat16"]
+quant_method = "none"
+use_torch_compile = false
+device_map = "auto"
+
+[inference]
+batch_size = 0
+max_batch_size = 8
+max_gen_tokens = 50
+
+[steering]
+vector_method = "mean"
+decay_kernel = "linear"
+orthogonal_projection = true
+weight_normalization = "none"
+strength_range = [1.0, 5.0]
+
+[optimization]
+num_trials = 25
+num_warmup_trials = 10
+checkpoint_dir = "checkpoints_27b"
+
+[kl]
+scale = 1.0
+token_count = 3
+target = 0.01
+prune_threshold = 5.0
+
+[detection]
+llm_judge = true
+llm_judge_model = "google/gemini-3.1-flash-lite-preview"
+llm_judge_batch_size = 10
+llm_judge_concurrency = 10
+
+[display]
+print_responses = false
+print_residual_geometry = false
+plot_residuals = false
+
+non_interactive = true
+
+[benign_prompts]
+dataset = "datasets/good_1000"
+split = "train[:800]"
+column = "prompt"
+
+[target_prompts]
+dataset = "datasets/harmful_1000"
+split = "train[:800]"
+column = "prompt"
+
+[benign_eval_prompts]
+dataset = "datasets/good_1000"
+split = "train[800:]"
+column = "prompt"
+
+[target_eval_prompts]
+dataset = "datasets/harmful_1000"
+split = "train[800:]"
+column = "prompt"

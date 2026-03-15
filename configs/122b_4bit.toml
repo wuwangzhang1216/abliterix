@@ -1,0 +1,70 @@
+# Qwen3.5-122B-A10B (MoE) steering config — NF4 quantization
+# 256 experts, 8 routed + 1 shared, 48 layers, hidden=3072, expert_dim=1024
+# NF4: ~61GB — easily fits 2x A100-80GB (160GB)
+
+[model]
+dtype_fallback_order = ["bfloat16"]
+quant_method = "bnb_4bit"
+use_torch_compile = false
+device_map = "auto"
+# Force all layers on GPU — 4-bit model (~61GB) easily fits 2xA100 (160GB).
+# Without this, accelerate over-estimates with int8 and spills to CPU,
+# which BNB 4-bit doesn't support.
+max_memory = {0 = "80GiB", 1 = "80GiB"}
+
+[inference]
+batch_size = 0
+max_batch_size = 4
+max_gen_tokens = 50
+
+[steering]
+vector_method = "mean"
+decay_kernel = "linear"
+orthogonal_projection = true
+weight_normalization = "none"
+# MoE: wider weight range
+strength_range = [1.0, 10.0]
+
+[optimization]
+num_trials = 25
+num_warmup_trials = 10
+checkpoint_dir = "checkpoints_122b_4bit"
+
+[kl]
+scale = 1.0
+token_count = 3
+target = 0.01
+prune_threshold = 5.0
+
+[detection]
+llm_judge = true
+llm_judge_model = "google/gemini-3.1-flash-lite-preview"
+llm_judge_batch_size = 10
+llm_judge_concurrency = 10
+
+[display]
+print_responses = false
+print_residual_geometry = false
+plot_residuals = false
+
+non_interactive = true
+
+[benign_prompts]
+dataset = "datasets/good_1000"
+split = "train[:800]"
+column = "prompt"
+
+[target_prompts]
+dataset = "datasets/harmful_1000"
+split = "train[:800]"
+column = "prompt"
+
+[benign_eval_prompts]
+dataset = "datasets/good_1000"
+split = "train[800:]"
+column = "prompt"
+
+[target_eval_prompts]
+dataset = "datasets/harmful_1000"
+split = "train[800:]"
+column = "prompt"

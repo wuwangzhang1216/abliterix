@@ -1,0 +1,95 @@
+# ========================
+# Python
+# ========================
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+build/
+dist/
+wheels/
+*.egg-info/
+*.egg
+MANIFEST
+
+# ========================
+# Virtual environments
+# ========================
+.venv/
+venv/
+env/
+.env
+
+# ========================
+# IDE / Editors
+# ========================
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# ========================
+# Linters & formatters
+# ========================
+.ruff_cache/
+.mypy_cache/
+
+# ========================
+# OS files
+# ========================
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# ========================
+# Prometheus project
+# ========================
+
+# User config (configs/default.toml is the tracked template)
+/config.toml
+/prometheus.toml
+
+# Datasets (user-provided, not distributed with the project)
+/datasets/
+
+# Model cards (for HF uploads, not part of the project)
+/configs/*_modelcard.md
+
+# Study checkpoints (generated at runtime)
+checkpoints*/
+
+# Experiment outputs (generated at runtime)
+experiments*/
+
+# Benchmark results (generated at runtime)
+/benchmarks/
+
+# One-off scratch scripts
+/scratch/
+
+# Residual analysis plots
+/plots/
+
+# Packaging artifacts
+*.tar
+*.tar.gz
+*.zip
+
+# ========================
+# ML / PyTorch
+# ========================
+*.pt
+*.pth
+*.bin
+*.safetensors
+*.gguf
+*.onnx
+
+# HuggingFace cache
+.cache/
+
+# ========================
+# Claude Code
+# ========================
+.claude/

@@ -1,0 +1,64 @@
+# Qwen3.5-4B (dense) steering config
+# ~8GB BF16, RTX 5090 32GB — plenty of headroom
+
+[model]
+dtype_fallback_order = ["bfloat16"]
+quant_method = "none"
+device_map = "auto"
+
+[inference]
+batch_size = 0
+max_batch_size = 32
+max_gen_tokens = 50
+
+[steering]
+vector_method = "mean"
+decay_kernel = "linear"
+orthogonal_projection = true
+weight_normalization = "none"
+
+[optimization]
+num_trials = 50
+num_warmup_trials = 15
+checkpoint_dir = "checkpoints_4b"
+
+[kl]
+scale = 1.0
+token_count = 3
+target = 0.01
+prune_threshold = 5.0
+
+[detection]
+llm_judge = true
+llm_judge_model = "google/gemini-3.1-flash-lite-preview"
+llm_judge_batch_size = 10
+llm_judge_concurrency = 10
+
+[display]
+print_responses = false
+print_residual_geometry = false
+plot_residuals = false
+
+non_interactive = true
+
+# Training prompts (for computing steering vectors)
+[benign_prompts]
+dataset = "datasets/good_1000"
+split = "train[:800]"
+column = "prompt"
+
+[target_prompts]
+dataset = "datasets/harmful_1000"
+split = "train[:800]"
+column = "prompt"
+
+# Evaluation prompts (for scoring each trial)
+[benign_eval_prompts]
+dataset = "datasets/good_1000"
+split = "train[800:]"
+column = "prompt"
+
+[target_eval_prompts]
+dataset = "datasets/harmful_1000"
+split = "train[800:]"
+column = "prompt"
