@@ -11,7 +11,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v6
+      - uses: astral-sh/setup-uv@v7
       - run: uv sync --group dev
       - run: uv run ruff check src/
       - run: uv run ruff format --check src/
@@ -20,7 +20,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v6
+      - uses: astral-sh/setup-uv@v7
       - run: uv sync --group dev
       - run: uv run ty check src/prometheus/
 
@@ -32,7 +32,7 @@ jobs:
     name: test (Python ${{ matrix.python-version }})
     steps:
       - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v6
+      - uses: astral-sh/setup-uv@v7
       - run: uv python install ${{ matrix.python-version }}
       - run: uv sync --group dev --python ${{ matrix.python-version }}
       - run: uv run pytest tests/ -x --cov=prometheus --cov-report=xml
@@ -46,5 +46,5 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v6
+      - uses: astral-sh/setup-uv@v7
       - run: uv build
