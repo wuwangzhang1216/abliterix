@@ -142,6 +142,38 @@ Measures speed differences between the old and new inference paths with alternat
 
 Runs four diagnostic experiments to validate optimization hypotheses: `output_scores` overhead, partial KL accuracy, pruning-rate analysis, and abliteration metadata traversal overhead.
 
+### `discover_model.py` - architecture discovery
+
+Inspects any HuggingFace model's architecture for Prometheus integration: config attributes, layer structure, steerable modules (attention/conv/MLP/MoE), router/gate discovery, fused expert weights, hidden states, chat template, and generation.
+
+```bash
+# Full discovery (loads model on GPU)
+python scripts/discover_model.py --model mistralai/Devstral-Small-2-24B-Instruct-2512
+
+# Config-only (no GPU needed)
+python scripts/discover_model.py --model LiquidAI/LFM2-24B-A2B --skip-load
+```
+
+Replaces the model-specific `discover_devstral.py`, `discover_glm4.py`, `discover_lfm2.py` scripts.
+
+### `push_model_card.py` - model card upload
+
+Pushes a model card to HuggingFace Hub. Reads the card body from a markdown file and sets metadata via CLI args.
+
+```bash
+python scripts/push_model_card.py \
+  --repo wangzhang/Devstral-Small-2-24B-Instruct-abliterated \
+  --base-model mistralai/Devstral-Small-2-24B-Instruct-2512 \
+  --card-file cards/devstral.md \
+  --tags prometheus uncensored abliterated mistral code \
+  --license apache-2.0 \
+  --language en zh
+```
+
+The HF token is read from `--token` or the `HF_TOKEN` environment variable.
+
+Replaces the model-specific `push_devstral_card.py`, `push_glm4_card.py`, `push_lfm2_card.py` scripts.
+
 ### `make_half_datasets.py` - halve datasets
 
 Samples half of the full datasets for faster testing.

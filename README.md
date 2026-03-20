@@ -39,7 +39,7 @@
 
 Prometheus finds the optimal abliteration parameters for any transformer model using [Optuna](https://optuna.org/) TPE optimization. It co-minimizes refusals and KL divergence from the original model — producing decensored models that retain as much intelligence as possible.
 
-Works with dense models, multimodal models, and MoE architectures (Qwen3/3.5 MoE, Mixtral, DeepSeek, Granite MoE Hybrid, MiniMax-M2.5).
+Works with dense models, multimodal models, and MoE architectures (Qwen3/3.5 MoE, Mixtral, DeepSeek, Granite MoE Hybrid, MiniMax-M2.5, LiquidAI LFM2, GLM-4 MoE, Mistral3/Devstral).
 
 
 ## Quick Start
@@ -70,7 +70,10 @@ Abliterated models uploaded to [Hugging Face](https://huggingface.co/wangzhang):
 
 | Model | Refusals | KL Divergence | Trials |
 |-------|----------|---------------|--------|
-| [Qwen3.5-122B-A10B](https://huggingface.co/wangzhang/Qwen3.5-122B-A10B-abliterated) | **1/200 (0.5%)** | 0.0115 | 25 |
+| [LFM2-24B-A2B](https://huggingface.co/wangzhang/LFM2-24B-A2B-abliterated) | **0/100 (0%)** | 0.0079 | 50 |
+| [GLM-4.7-Flash](https://huggingface.co/wangzhang/GLM-4.7-Flash-abliterated) | 1/100 (1%) | 0.0133 | 50 |
+| [Devstral-Small-2-24B](https://huggingface.co/wangzhang/Devstral-Small-2-24B-Instruct-abliterated) | 3/100 (3%) | 0.0086 | 50 |
+| [Qwen3.5-122B-A10B](https://huggingface.co/wangzhang/Qwen3.5-122B-A10B-abliterated) | 1/200 (0.5%) | 0.0115 | 25 |
 | [Qwen3.5-35B-A3B](https://huggingface.co/wangzhang/Qwen3.5-35B-A3B-abliterated) | 3/200 (1.5%) | **0.0035** | 50 |
 | [Qwen3.5-27B](https://huggingface.co/wangzhang/Qwen3.5-27B-abliterated) | 3/200 (1.5%) | 0.0051 | 35 |
 | [Qwen3.5-9B](https://huggingface.co/wangzhang/Qwen3.5-9B-abliterated) | 2/200 (1%) | 0.0105 | 50 |
@@ -85,6 +88,7 @@ Abliterated models uploaded to [Hugging Face](https://huggingface.co/wangzhang):
 - **More trials unlock better parameters** — the 27B improved from 7 to 3 refusals when trials increased from 15 to 35. The 4B dropped from 34 refusals (17%) to just 3 (1.5%) with continued optimization.
 - **Per-layer direction index is critical at scale** — for 122B, independently optimizing the refusal direction per layer reduced refusals from 180/200 to 1/200. A single global direction failed entirely.
 - **MoE hybrid steering** — combining LoRA abliteration with router weight suppression and fused expert abliteration proved essential for MoE architectures.
+- **Non-transformer architectures work too** — LFM2's hybrid conv+attention architecture achieved 0% refusals by steering convolution output projections alongside attention and MLP components.
 
 
 ## Features
@@ -113,7 +117,7 @@ llm_judge_model = "google/gemini-3.1-flash-lite-preview"
 - **Auto batch size** — exponential search finds the largest batch size that fits in VRAM
 - **KL divergence pruning** — trials with KL above threshold are terminated early, saving compute
 - **Fractional direction index** — interpolates between adjacent layer directions for finer-grained search
-- **Per-component parameters** — separate abliteration weights for attention vs. MLP
+- **Per-component parameters** — separate abliteration weights for attention, MLP, and convolution components
 
 ### Advanced Options
 
@@ -134,7 +138,7 @@ Three steering mechanisms for Mixture-of-Experts models:
 2. **Router Weight Suppression** — applies learned negative bias to routing weights of safety-critical experts
 3. **Fused Expert Abliteration** — direct rank-1 modification of expert `down_proj` matrices
 
-Supported architectures: Qwen3/3.5 MoE, Mixtral, DeepSeek MoE, Granite MoE Hybrid, MiniMax-M2.5. See [configs/](configs/) for model-specific examples.
+Supported architectures: Qwen3/3.5 MoE, Mixtral, DeepSeek MoE, Granite MoE Hybrid, MiniMax-M2.5, LiquidAI LFM2 (hybrid conv+attention MoE), GLM-4 MoE Lite (MLA + MoE). See [configs/](configs/) for model-specific examples.
 
 
 ## Configuration
@@ -161,6 +165,9 @@ Pre-built configs for specific setups:
 | [`qwen3.5_122b_int8.toml`](configs/qwen3.5_122b_int8.toml) | Qwen3.5-122B-A10B (INT8, ~122GB) |
 | [`qwen3.5_397b.toml`](configs/qwen3.5_397b.toml) | Qwen3.5-397B-A17B MoE (NF4, ~215GB) |
 | [`minimax_m2.5.toml`](configs/minimax_m2.5.toml) | MiniMax-M2.5 229B MoE (FP8, ~229GB) |
+| [`lfm2_24b.toml`](configs/lfm2_24b.toml) | LiquidAI LFM2-24B-A2B hybrid conv+GQA MoE |
+| [`glm4_flash.toml`](configs/glm4_flash.toml) | GLM-4.7-Flash 30B MoE (MLA, ~56GB BF16) |
+| [`devstral_24b.toml`](configs/devstral_24b.toml) | Devstral-Small-2-24B dense (~45GB BF16) |
 | [`qwen3.5_0.8b_100t.toml`](configs/qwen3.5_0.8b_100t.toml) | Extended 100-trial optimization |
 | [`noslop.toml`](configs/noslop.toml) | Anti-slop tuning |
 

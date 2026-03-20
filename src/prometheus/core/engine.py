@@ -38,13 +38,14 @@ def resolve_model_class(
 ) -> Type[AutoModelForImageTextToText] | Type[AutoModelForCausalLM]:
     """Choose the correct AutoModel class based on the model's configuration.
 
-    Vision-language models are loaded via AutoModelForCausalLM (text backbone
-    only) to avoid vision components landing on meta devices during quantised
-    loading with device_map="auto".
+    Vision-language models (e.g. Mistral3, Qwen-VL) use
+    ``AutoModelForImageTextToText``; their text backbone is accessed via the
+    ``model.language_model`` path in ``transformer_layers``.  Pure text models
+    use ``AutoModelForCausalLM``.
     """
     configs = PretrainedConfig.get_config_dict(model_id)
     if any("vision_config" in cfg for cfg in configs):
-        return AutoModelForCausalLM
+        return AutoModelForImageTextToText
     return AutoModelForCausalLM
 
 
@@ -354,6 +355,10 @@ class SteeringEngine:
         with suppress(Exception):
             _register("mlp.down_proj", layer.mlp.shared_expert.down_proj)  # ty:ignore[possibly-missing-attribute]
 
+        # Shared experts (GLM-4 MoE Lite — plural naming).
+        with suppress(Exception):
+            _register("mlp.down_proj", layer.mlp.shared_experts.down_proj)  # ty:ignore[possibly-missing-attribute]
+
         # Phi-3.5-MoE.
         with suppress(Exception):
             for expert in layer.block_sparse_moe.experts:  # ty:ignore[possibly-missing-attribute, not-iterable]
@@ -367,6 +372,18 @@ class SteeringEngine:
         with suppress(Exception):
             for expert in layer.moe.experts:  # ty:ignore[possibly-missing-attribute, not-iterable]
                 _register("mlp.down_proj", expert.output_linear)  # ty:ignore[possibly-missing-attribute]
+
+        # LFM2 MoE — gated short convolution output projection.
+        with suppress(Exception):
+            _register("conv.out_proj", layer.conv.out_proj)  # ty:ignore[possibly-missing-attribute]
+
+        # LFM2 MoE — attention output projection (named out_proj, not o_proj).
+        with suppress(Exception):
+            _register("attn.o_proj", layer.self_attn.out_proj)  # ty:ignore[possibly-missing-attribute]
+
+        # LFM2 MoE — dense MLP down-projection (layers 0-1, w2 naming).
+        with suppress(Exception):
+            _register("mlp.down_proj", layer.feed_forward.w2)  # ty:ignore[possibly-missing-attribute]
 
         total = sum(len(mods) for mods in modules.values())
         assert total > 0, "No steerable modules found in layer"
@@ -385,7 +402,7 @@ class SteeringEngine:
 
     def _locate_router(self, layer: Module) -> Module | None:
         """Find the MoE router/gate module that contains a 2-D weight tensor."""
-        for path in ["mlp.gate", "block_sparse_moe.gate"]:
+        for path in ["mlp.gate", "block_sparse_moe.gate", "feed_forward.gate"]:
             obj: Any = layer
             for attr in path.split("."):
                 obj = getattr(obj, attr, None)
@@ -399,7 +416,7 @@ class SteeringEngine:
 
     def _locate_fused_weights(self, layer: Module) -> Parameter | None:
         """Find the fused 3-D expert parameter [experts, hidden, intermediate]."""
-        for path in ["mlp.experts.down_proj"]:
+        for path in ["mlp.experts.down_proj", "feed_forward.experts.down_proj"]:
             obj: Any = layer
             for attr in path.split("."):
                 obj = getattr(obj, attr, None)
