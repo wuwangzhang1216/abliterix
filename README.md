@@ -32,6 +32,7 @@
 - [References](#references)
 - [Citation](#citation)
 - [Acknowledgments](#acknowledgments)
+- [Datasets](#datasets)
 - [Contributing](#contributing)
 - [License](#license)
 
@@ -196,6 +197,20 @@ Example: PaCMAP visualization shows harmful (red) vs. harmless (blue) activation
 
 <!-- To add a screenshot: save the image to assets/ and uncomment the line below -->
 <!-- ![PaCMAP visualization](assets/pacmap_example.png) -->
+
+
+## Datasets
+
+Evaluation prompt datasets are available on Hugging Face: [wangzhang/prometheus-datasets](https://huggingface.co/datasets/wangzhang/prometheus-datasets)
+
+| Dataset | Count | Description |
+|---------|-------|-------------|
+| `good_500` | 500 | Harmless prompts — recommended for iteration |
+| `good_1000` | 1000 | Harmless prompts — full set |
+| `harmful_500` | 500 | Harmful prompts — recommended for iteration |
+| `harmful_1000` | 1000 | Harmful prompts — full set |
+
+The 500-example sets run ~2x faster than the 1000 sets with no clear quality loss. Prometheus uses these datasets to compute refusal directions and evaluate abliteration effectiveness.
 
 
 ## References
