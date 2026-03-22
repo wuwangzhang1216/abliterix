@@ -49,13 +49,19 @@ def inspect_config(model_id: str):
 # ── Step 1: Load model ──────────────────────────────────────────────
 
 def load_model(model_id: str):
-    from transformers import AutoModelForCausalLM
+    from transformers import AutoConfig, AutoModelForCausalLM, AutoModelForImageTextToText
 
     print("=" * 70)
     print("STEP 1: Loading model (BF16)")
     print("=" * 70)
 
-    model = AutoModelForCausalLM.from_pretrained(
+    # Auto-detect VLMs (Mistral3, Qwen-VL, etc.) via vision_config
+    configs = AutoConfig.from_pretrained(model_id, trust_remote_code=True)
+    is_vlm = hasattr(configs, "vision_config") and configs.vision_config is not None
+    cls = AutoModelForImageTextToText if is_vlm else AutoModelForCausalLM
+    print(f"  Model class: {cls.__name__} (VLM={is_vlm})")
+
+    model = cls.from_pretrained(
         model_id, torch_dtype=torch.bfloat16, device_map="auto",
         trust_remote_code=True,
     )
@@ -167,6 +173,24 @@ def discover_steerable_modules(layers):
             "attention.o_proj", "attention.out_proj",
             "linear_attn.out_proj",
         ]
+
+        # MLA (Multi-head Latent Attention) projections — DeepSeek/Mistral4 style
+        mla_paths = [
+            "self_attn.q_a_proj", "self_attn.q_b_proj",
+            "self_attn.kv_a_proj_with_mqa", "self_attn.kv_b_proj",
+            "self_attn.q_a_layernorm", "self_attn.kv_a_layernorm",
+        ]
+        for path in mla_paths:
+            obj = layer
+            for attr in path.split("."):
+                obj = getattr(obj, attr, None)
+                if obj is None:
+                    break
+            if obj is not None:
+                w_info = ""
+                if hasattr(obj, "weight"):
+                    w_info = f" shape={obj.weight.shape}, dtype={obj.weight.dtype}"
+                print(f"  [MLA] {path}: {type(obj).__name__}{w_info}")
         for path in attn_paths:
             obj = layer
             for attr in path.split("."):
@@ -225,6 +249,23 @@ def discover_steerable_modules(layers):
                     break
             if obj is not None and hasattr(obj, "weight"):
                 print(f"  [DENSE MLP] {path}: {obj.weight.shape}")
+
+        # Shared expert (MoE models with shared experts, e.g. Mistral4, DeepSeek)
+        shared_paths = [
+            "mlp.shared_expert", "feed_forward.shared_expert",
+            "mlp.shared_experts", "feed_forward.shared_experts",
+        ]
+        for path in shared_paths:
+            obj = layer
+            for attr in path.split("."):
+                obj = getattr(obj, attr, None)
+                if obj is None:
+                    break
+            if obj is not None:
+                print(f"  [SHARED EXPERT] {path}: {type(obj).__name__}")
+                for cname, cmod in obj.named_children():
+                    w_info = f" shape={cmod.weight.shape}" if hasattr(cmod, "weight") else ""
+                    print(f"    {path}.{cname}: {type(cmod).__name__}{w_info}")
 
 
 # ── Step 5: Discover MoE router ────────────────────────────────────

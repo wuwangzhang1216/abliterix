@@ -402,7 +402,7 @@ class SteeringEngine:
 
     def _locate_router(self, layer: Module) -> Module | None:
         """Find the MoE router/gate module that contains a 2-D weight tensor."""
-        for path in ["mlp.gate", "block_sparse_moe.gate", "feed_forward.gate"]:
+        for path in ["mlp.gate", "mlp.router", "block_sparse_moe.gate", "feed_forward.gate"]:
             obj: Any = layer
             for attr in path.split("."):
                 obj = getattr(obj, attr, None)

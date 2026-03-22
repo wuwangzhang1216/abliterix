@@ -283,11 +283,31 @@ def _detect_response_prefix(
         print(
             f"* Candidate prefix from 20 prompts: [bold]{engine.response_prefix!r}[/]"
         )
-        print("* Validating with larger sample...")
-        expanded = benign_msgs[:25] + target_msgs[:25]
-        engine.response_prefix = commonprefix(
-            engine.generate_text_batched(expanded),
-        ).rstrip(" ")
+        # Check for known CoT/thinking patterns BEFORE validation, because
+        # the larger validation sample may dilute the common prefix (e.g.
+        # mixed-language Harmony responses share only the channel tokens).
+        _KNOWN_COT_PREFIXES = {
+            "<think>": "<think></think>",
+            "<thought>": "<thought></thought>",
+            "[THINK]": "[THINK][/THINK]",
+            "<|channel|>analysis<|message|>": (
+                "<|channel|>analysis<|message|><|end|><|start|>assistant"
+                "<|channel|>final<|message|>"
+            ),
+        }
+        matched_early = False
+        for pattern, replacement in _KNOWN_COT_PREFIXES.items():
+            if engine.response_prefix.startswith(pattern):
+                engine.response_prefix = replacement
+                matched_early = True
+                break
+
+        if not matched_early:
+            print("* Validating with larger sample...")
+            expanded = benign_msgs[:25] + target_msgs[:25]
+            engine.response_prefix = commonprefix(
+                engine.generate_text_batched(expanded),
+            ).rstrip(" ")
     else:
         cot_tokens = {"<think>", "<thought>", "[THINK]"}
         extra_special = set(

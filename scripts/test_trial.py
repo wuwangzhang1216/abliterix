@@ -124,6 +124,11 @@ def main():
         print("Profiling MoE experts...")
         safety_experts = engine.identify_safety_experts(benign, target)
 
+    # Detect response prefix (e.g. Harmony format, CoT thinking)
+    from prometheus.cli import _detect_response_prefix
+
+    _detect_response_prefix(engine, benign_msgs=benign, target_msgs=target)
+
     del benign, target
     flush_memory()
 
