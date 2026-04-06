@@ -47,7 +47,7 @@ research = [
     "scikit-learn~=1.7",
 ]
 ui = [
-    "gradio~=5.20",
+    "gradio~=6.11",
     "plotly~=6.1",
 ]
 vllm = [
