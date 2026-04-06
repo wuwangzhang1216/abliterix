@@ -1,0 +1,61 @@
+# Gemma 4 31B Instruct (dense, 60 layers, hidden=5376)
+# Interleaved sliding (head_dim=256) + global (head_dim=512) attention, 5:1 ratio.
+# Target: single H100 80GB, BF16 (~66GB weights + activations + KV cache).
+
+[model]
+model_id = "google/gemma-4-31B-it"
+dtype_fallback_order = ["bfloat16"]
+quant_method = "none"
+use_torch_compile = false
+device_map = "auto"
+max_memory = {0 = "76GiB"}
+
+[inference]
+batch_size = 0
+max_batch_size = 4
+max_gen_tokens = 100
+
+[steering]
+vector_method = "mean"
+decay_kernel = "linear"
+orthogonal_projection = false
+strength_range = [1.0, 2.5]
+
+[optimization]
+num_trials = 75
+num_warmup_trials = 20
+checkpoint_dir = "checkpoints_gemma4_31b_v6"
+
+[kl]
+scale = 1.0
+token_count = 3
+target = 0.01
+prune_threshold = 5.0
+
+[detection]
+llm_judge = true
+llm_judge_batch_size = 10
+llm_judge_concurrency = 35
+
+[benign_prompts]
+dataset = "datasets/good_500"
+split = "train[:400]"
+column = "prompt"
+
+[target_prompts]
+dataset = "datasets/harmful_500"
+split = "train[:400]"
+column = "prompt"
+
+[benign_eval_prompts]
+dataset = "datasets/good_500"
+split = "train[400:]"
+column = "prompt"
+
+[target_eval_prompts]
+dataset = "datasets/harmful_500"
+split = "train[400:]"
+column = "prompt"
+
+[display]
+print_responses = false

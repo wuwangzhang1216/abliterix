@@ -1,15 +1,14 @@
-# MiniMax-M2.5 (MoE) steering config — FP8 native
-# 256 experts (8 routed, no shared expert), 62 layers, hidden=3072, expert_dim=1536
-# FP8: ~230GB weights — fits 3× RTX PRO 6000 96GB (288GB total)
+# MiniMax-M2.5 (MoE) — vLLM dual-engine config for 4× H100 80GB
+# 256 experts (8 routed), 62 layers, hidden=3072, expert_dim=1536
+# FP8: ~220GB weights → TP=4 → ~55GB/GPU, ~25GB headroom for KV cache + LoRA
 #
-# Architecture: MiniMaxM2ForCausalLM (custom code, trust_remote_code=true)
-# MoE module: block_sparse_moe (Phi-3.5-MoE naming convention)
-# Expert linears: w1 (gate_proj), w2 (down_proj), w3 (up_proj)
-# Routing: sigmoid scoring with e_score_correction_bias (DeepSeek-style)
+# Architecture: HF Phase 1 (hidden states + steering vectors) → vLLM Phase 2
+# (tensor-parallel generation with LoRA hot-swap).
 #
-# NOTE: skip_fp8_dequant=true uses native FP8 GEMM instead of the slow
-# Python-level bf16 monkey-patching workaround. Requires SM89+ GPU with
-# a compatible transformers version (4.57.x).
+# TP must divide num_kv_heads=8. Valid: 1, 2, 4, 8. TP=4 is the sweet spot.
+#
+# NOTE: MoE expert routing (n_suppress, router_bias) is NOT supported in
+# vLLM mode — only LoRA weight steering is applied.
 
 [model]
 model_id = "MiniMaxAI/MiniMax-M2.5"
@@ -20,8 +19,12 @@ attn_implementation = "flash_attention_2"
 use_torch_compile = false
 device_map = "auto"
 trust_remote_code = true
-# 3× RTX PRO 6000 96GB — leave ~4GB/GPU headroom
-max_memory = {0 = "92GiB", 1 = "92GiB", 2 = "92GiB"}
+# Phase 1 (HF): spread across 4× H100 80GB
+max_memory = {0 = "76GiB", 1 = "76GiB", 2 = "76GiB", 3 = "76GiB"}
+# Phase 2 (vLLM): tensor parallelism across all 4 GPUs
+backend = "vllm"
+tensor_parallel_size = 4
+gpu_memory_utilization = 0.92
 
 [inference]
 batch_size = 0
@@ -39,7 +42,7 @@ strength_range = [1.0, 10.0]
 [optimization]
 num_trials = 50
 num_warmup_trials = 10
-checkpoint_dir = "checkpoints_minimax_m25"
+checkpoint_dir = "checkpoints_minimax_m25_vllm"
 
 [kl]
 scale = 1.0

@@ -1,18 +1,22 @@
-# Qwen3.5-122B-A10B (MoE) steering config — BF16
-# 256 experts, 8 routed + 1 shared, 48 layers, hidden=3072, expert_dim=1024
-# BF16 needs ~244GB — use 3x GPU with device_map="auto"
+# Qwen3.5-397B-A17B (MoE) steering config — FP8 (pre-quantized)
+# 512 experts (10 routed + 1 shared), 60 layers, hidden=4096, expert_dim=1024
+# FP8: ~397GB weights — fits 6× H100 80GB (480GB) with headroom for activations
+# REQUIRES: Compute Capability >= 8.9 (H100/H200, SM89+). A100 is NOT supported.
 
 [model]
-dtype_fallback_order = ["bfloat16"]
-quant_method = "none"
+model_id = "Qwen/Qwen3.5-397B-A17B-FP8"
+dtype_fallback_order = ["auto"]
+quant_method = "fp8"
 use_torch_compile = false
 device_map = "auto"
-model_id = "Qwen/Qwen3.5-122B-A10B"
+trust_remote_code = true
+# 6× H100 80GB — leave ~4GB/GPU for activations, KV cache, MoE routing buffers
 max_memory = {0 = "76GiB", 1 = "76GiB", 2 = "76GiB", 3 = "76GiB", 4 = "76GiB", 5 = "76GiB"}
 
 [inference]
 batch_size = 0
-max_batch_size = 8
+# 397B activations are ~3× the 122B footprint at the same batch size
+max_batch_size = 2
 max_gen_tokens = 50
 
 [steering]
@@ -20,13 +24,13 @@ vector_method = "mean"
 decay_kernel = "linear"
 orthogonal_projection = true
 weight_normalization = "none"
-# MoE: wider weight range
+# MoE: wider weight range (matches 122B/397B BNB configs)
 strength_range = [1.0, 10.0]
 
 [optimization]
 num_trials = 50
 num_warmup_trials = 10
-checkpoint_dir = "checkpoints_122b"
+checkpoint_dir = "checkpoints_397b_fp8"
 
 [kl]
 scale = 1.0
@@ -37,8 +41,8 @@ prune_threshold = 5.0
 [detection]
 llm_judge = true
 llm_judge_model = "google/gemini-3.1-flash-lite-preview"
-llm_judge_batch_size = 10
-llm_judge_concurrency = 10
+llm_judge_batch_size = 25
+llm_judge_concurrency = 25
 
 [display]
 print_responses = false

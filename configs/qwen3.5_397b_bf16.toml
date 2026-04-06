@@ -1,18 +1,20 @@
-# Qwen3.5-122B-A10B (MoE) steering config — BF16
-# 256 experts, 8 routed + 1 shared, 48 layers, hidden=3072, expert_dim=1024
-# BF16 needs ~244GB — use 3x GPU with device_map="auto"
+# Qwen3.5-397B-A17B (MoE) steering config — BF16
+# 512 experts (10 routed + 1 shared), 60 layers, hidden=4096, expert_dim=1024
+# BF16: ~794GB weights — fits 8× H200 141GB (1128GB) with 334GB headroom
 
 [model]
+model_id = "Qwen/Qwen3.5-397B-A17B"
 dtype_fallback_order = ["bfloat16"]
 quant_method = "none"
 use_torch_compile = false
 device_map = "auto"
-model_id = "Qwen/Qwen3.5-122B-A10B"
-max_memory = {0 = "76GiB", 1 = "76GiB", 2 = "76GiB", 3 = "76GiB", 4 = "76GiB", 5 = "76GiB"}
+trust_remote_code = true
+# 8× H200 141GB — leave headroom for activations, KV cache, MoE routing
+max_memory = {0 = "134GiB", 1 = "134GiB", 2 = "134GiB", 3 = "134GiB", 4 = "134GiB", 5 = "134GiB", 6 = "134GiB", 7 = "134GiB"}
 
 [inference]
 batch_size = 0
-max_batch_size = 8
+max_batch_size = 4
 max_gen_tokens = 50
 
 [steering]
@@ -26,7 +28,7 @@ strength_range = [1.0, 10.0]
 [optimization]
 num_trials = 50
 num_warmup_trials = 10
-checkpoint_dir = "checkpoints_122b"
+checkpoint_dir = "checkpoints_397b_bf16"
 
 [kl]
 scale = 1.0
@@ -37,8 +39,8 @@ prune_threshold = 5.0
 [detection]
 llm_judge = true
 llm_judge_model = "google/gemini-3.1-flash-lite-preview"
-llm_judge_batch_size = 10
-llm_judge_concurrency = 10
+llm_judge_batch_size = 25
+llm_judge_concurrency = 25
 
 [display]
 print_responses = false

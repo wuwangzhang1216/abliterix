@@ -50,6 +50,10 @@ ui = [
     "gradio~=5.20",
     "plotly~=6.1",
 ]
+vllm = [
+    "vllm>=0.8",
+    "speculators>=0.1.9",
+]
 
 [dependency-groups]
 dev = [

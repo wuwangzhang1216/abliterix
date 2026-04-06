@@ -83,6 +83,48 @@ class ModelConfig(BaseModel):
         description="Whether to trust remote code shipped with the model.",
     )
 
+    attn_implementation: str | None = Field(
+        default=None,
+        description=(
+            "Attention implementation to use (e.g. 'flash_attention_2', 'sdpa', 'eager'). "
+            "When set, passed directly to from_pretrained()."
+        ),
+    )
+
+    skip_fp8_dequant: bool = Field(
+        default=False,
+        description=(
+            "Skip the FP8→bf16 dequantisation workaround.  Enable this when running "
+            "on GPUs with reliable native FP8 GEMM (e.g. H100/H200/RTX PRO 6000 with "
+            "a compatible transformers version)."
+        ),
+    )
+
+    backend: str = Field(
+        default="hf",
+        description=(
+            "Inference backend: 'hf' for HuggingFace Transformers (pipeline parallelism), "
+            "'vllm' for vLLM (tensor parallelism).  vLLM provides dramatically higher "
+            "throughput on multi-GPU setups by parallelising computation across GPUs "
+            "instead of sharding layers sequentially."
+        ),
+    )
+
+    tensor_parallel_size: int | None = Field(
+        default=None,
+        description=(
+            "Number of GPUs for vLLM tensor parallelism.  None = auto-detect all "
+            "available GPUs.  Ignored when backend='hf'."
+        ),
+    )
+
+    gpu_memory_utilization: float = Field(
+        default=0.92,
+        description=(
+            "Fraction of GPU memory vLLM may use (0.0-1.0).  Ignored when backend='hf'."
+        ),
+    )
+
 
 class InferenceConfig(BaseModel):
     """Settings that control generation and batch sizing."""

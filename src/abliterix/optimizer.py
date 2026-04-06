@@ -62,7 +62,7 @@ def run_search(
         Residual states for discriminative layer selection.
     """
     opt = config.optimization
-    num_layers = len(engine.transformer_layers)
+    num_layers = engine.get_n_layers()
     last_layer = num_layers - 1
 
     # ----------------------------------------------------------------
@@ -162,21 +162,47 @@ def run_search(
         for name, value in format_trial_params(trial).items():
             print(f"  * {name} = [bold]{value}[/]")
 
-        print("* Resetting model...")
-        engine.restore_baseline()
+        # vLLM backend: build LoRA adapter from projection cache
+        # instead of modifying HF model weights.
+        vllm_gen = getattr(engine, "_vllm_gen", None)
+        proj_cache = getattr(engine, "_projection_cache", None)
+        adapter_path = None
 
-        print("* Applying steering...")
-        apply_steering(
-            engine,
-            steering_vectors,
-            vector_index,
-            profiles,
-            config,
-            safety_experts=safety_experts,
-            routing_config=routing,
-            benign_states=benign_states,
-            target_states=target_states,
-        )
+        if vllm_gen is not None and proj_cache is not None:
+            if routing is not None and trial_counter == 1:
+                print(
+                    "  [yellow]Warning: MoE expert routing (n_suppress, router_bias, "
+                    "expert_ablation_weight) is not supported in vLLM mode — "
+                    "only LoRA weight steering is applied.[/]"
+                )
+            print("* Building LoRA adapter for vLLM...")
+            lora_weights = proj_cache.build_lora_weights(
+                profiles, vector_index, config,
+            )
+            if lora_weights:
+                adapter_path = vllm_gen.save_adapter(
+                    lora_weights,
+                    proj_cache.target_modules,
+                    config.model.model_id,
+                )
+            # Store adapter path on engine for scorer/detector to use.
+            engine._current_adapter_path = adapter_path
+        else:
+            print("* Resetting model...")
+            engine.restore_baseline()
+
+            print("* Applying steering...")
+            apply_steering(
+                engine,
+                steering_vectors,
+                vector_index,
+                profiles,
+                config,
+                safety_experts=safety_experts,
+                routing_config=routing,
+                benign_states=benign_states,
+                target_states=target_states,
+            )
 
         print("* Evaluating...")
         kl, length_dev = scorer.measure_kl_and_coherence(engine)

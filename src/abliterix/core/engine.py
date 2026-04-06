@@ -120,6 +120,12 @@ class SteeringEngine:
         self.needs_reload = False
         self._dequant_cache: dict[int, Tensor] = {}
 
+        # Cached metadata — populated by prepare_for_unload() before the HF
+        # model is freed, so the optimizer can still query layer/component
+        # info after engine.model is set to None.
+        self._cached_n_layers: int | None = None
+        self._cached_components: list[str] | None = None
+
         model_id = config.model.model_id
 
         print()
@@ -155,6 +161,14 @@ class SteeringEngine:
                 config.model.trust_remote_code
             )
 
+        # Workaround: transformers FP8 quantizer accesses config.intermediate_size
+        # as a fallback when moe_intermediate_size is absent. Some MoE model configs
+        # (e.g. Qwen3.5 MoE) only define moe_intermediate_size, causing an
+        # AttributeError during replace_with_fp8_linear. Patch the config class
+        # to alias intermediate_size → moe_intermediate_size if needed.
+        if config.model.quant_method == QuantMode.FP8:
+            self._patch_moe_config_for_fp8(model_id)
+
         for dtype in config.model.dtype_fallback_order:
             print(f"* Trying dtype [bold]{dtype}[/]... ", end="")
 
@@ -164,6 +178,9 @@ class SteeringEngine:
                 extra: dict[str, Any] = {}
                 if qconfig is not None:
                     extra["quantization_config"] = qconfig
+
+                if config.model.attn_implementation is not None:
+                    extra["attn_implementation"] = config.model.attn_implementation
 
                 self.model = resolve_model_class(model_id).from_pretrained(
                     model_id,
@@ -177,6 +194,16 @@ class SteeringEngine:
 
                 if self.trusted_models.get(model_id) is None:
                     self.trusted_models[model_id] = True
+
+                # FP8 dequant MUST run before the smoke-test: the Triton
+                # finegrained FP8 kernels can crash with newer torch versions
+                # ("Parameter block_size has unsupported type list"), so we
+                # replace them with bf16 dequant before any forward pass.
+                if (
+                    config.model.quant_method == QuantMode.FP8
+                    and not config.model.skip_fp8_dequant
+                ):
+                    self._dequant_fp8_to_bf16()
 
                 # Smoke-test: a single forward pass catches dtype-related
                 # runtime errors (inf/nan probability tensors, etc.).
@@ -205,6 +232,9 @@ class SteeringEngine:
 
         if self.model is None:
             raise RuntimeError("Failed to load model with all configured dtypes.")
+
+        # NOTE: FP8 dequant is now applied inside the dtype loop (above),
+        # before the smoke-test, so we no longer need it here.
 
         self._init_adapters()
         self._init_expert_routing()
@@ -239,6 +269,96 @@ class SteeringEngine:
             )
 
     # ------------------------------------------------------------------
+    # FP8 dequantization workaround
+    # ------------------------------------------------------------------
+
+    def _dequant_fp8_to_bf16(self):
+        """Replace FP8 Linear forward paths with on-the-fly bf16 dequantization.
+
+        Transformers' fine-grained FP8 integration uses Triton JIT kernels for
+        dequant+matmul that have a known async race condition on multi-GPU
+        ``device_map="auto"`` setups (see Qwen FP8 model card warnings and
+        HuggingFace transformers issue tracker).
+
+        This method monkey-patches every ``nn.Linear`` that holds FP8 weights
+        to dequantize to bf16 on-the-fly during forward, replacing the Triton
+        path with standard CUDA matmul.  Peak memory overhead is one layer's
+        worth of bf16 weights at a time (freed after each forward call).
+        """
+        _FP8_DTYPES = {torch.float8_e4m3fn, torch.float8_e5m2}
+        patched = 0
+
+        for name, module in self.model.named_modules():
+            if not isinstance(module, torch.nn.Linear):
+                continue
+            if module.weight.dtype not in _FP8_DTYPES:
+                continue
+
+            # Check for block-wise FP8 scale tensors (used by fine-grained FP8
+            # models like Qwen3.5-*-FP8).
+            scale_attr = None
+            for attr_name in ("weight_scale", "weight_scale_inv"):
+                if hasattr(module, attr_name):
+                    scale_attr = attr_name
+                    break
+
+            # Stash the original forward and patch.
+            original_forward = module.forward
+
+            if scale_attr is not None:
+                # Block-wise FP8: dequant using the per-block scale tensor.
+                scale_tensor = getattr(module, scale_attr)
+                fp8_weight = module.weight
+                bias = module.bias
+
+                def _make_blockwise_forward(w, s, b, is_inv):
+                    def _forward(x):
+                        w_f = w.to(torch.bfloat16)
+                        s_f = s.float()
+                        # Expand block-wise scales to match weight shape.
+                        block_size = max(1, w.shape[-1] // s.shape[-1])
+                        s_exp = s_f.repeat_interleave(block_size, dim=-1)[
+                            :, : w.shape[-1]
+                        ]
+                        if s_exp.shape[0] < w.shape[0]:
+                            s_exp = s_exp.repeat_interleave(
+                                max(1, w.shape[0] // s_exp.shape[0]), dim=0
+                            )[: w.shape[0]]
+                        if is_inv:
+                            w_bf16 = (w_f * s_exp).to(torch.bfloat16)
+                        else:
+                            w_bf16 = (w_f / s_exp).to(torch.bfloat16)
+                        return F.linear(x.to(torch.bfloat16), w_bf16, b)
+
+                    return _forward
+
+                is_inverse = scale_attr == "weight_scale_inv"
+                module.forward = _make_blockwise_forward(
+                    fp8_weight, scale_tensor, bias, is_inverse
+                )
+            else:
+                # No scale tensor: simple cast (per-tensor FP8 or unscaled).
+                fp8_weight = module.weight
+                bias = module.bias
+
+                def _make_simple_forward(w, b):
+                    def _forward(x):
+                        return F.linear(
+                            x.to(torch.bfloat16), w.to(torch.bfloat16), b
+                        )
+
+                    return _forward
+
+                module.forward = _make_simple_forward(fp8_weight, bias)
+
+            patched += 1
+
+        print(
+            f"* FP8→bf16 dequant: patched [bold]{patched}[/] Linear modules "
+            f"(bypasses Triton FP8 kernels for multi-GPU compatibility)"
+        )
+
+    # ------------------------------------------------------------------
     # Adapter / LoRA management
     # ------------------------------------------------------------------
 
@@ -246,17 +366,24 @@ class SteeringEngine:
         """Wrap the base model in PEFT LoRA adapters targeting steerable modules."""
         assert isinstance(self.model, PreTrainedModel)
 
-        leaf_names: set[str] = set()
-        for idx, layer in enumerate(self.transformer_layers):
-            id_to_leaf = {
-                id(m): name.split(".")[-1] for name, m in layer.named_modules()
-            }
+        # Build a map from module id to its full path in the model tree.
+        # We use full paths (not leaf names) to avoid collisions with identically
+        # named modules outside the transformer_layers — notably the vision
+        # tower in multimodal models like Gemma 4, whose `o_proj` modules may
+        # be custom wrappers that PEFT can't adapt.
+        id_to_path: dict[int, str] = {
+            id(m): name for name, m in self.model.named_modules()
+        }
+
+        target_paths: set[str] = set()
+        for idx in range(len(self.transformer_layers)):
             for modules in self.steerable_modules(idx).values():
                 for mod in modules:
-                    if id(mod) in id_to_leaf:
-                        leaf_names.add(id_to_leaf[id(mod)])
+                    path = id_to_path.get(id(mod))
+                    if path is not None:
+                        target_paths.add(path)
 
-        targets = list(leaf_names)
+        targets = sorted(target_paths)
 
         if self.config.steering.weight_normalization != WeightNorm.FULL:
             rank = 1
@@ -274,6 +401,15 @@ class SteeringEngine:
 
         self.model = cast(PeftModel, get_peft_model(self.model, self.peft_config))
 
+        # PEFT inherits the base layer's dtype for LoRA A/B weights.  For FP8
+        # models this produces Float8_e4m3fn parameters that crash F.linear
+        # ("addmm_cuda not implemented for Float8_e4m3fn").  Cast to bf16.
+        if self.config.model.quant_method == QuantMode.FP8:
+            _fp8 = {torch.float8_e4m3fn, torch.float8_e5m2}
+            for name, param in self.model.named_parameters():
+                if "lora_" in name and param.dtype in _fp8:
+                    param.data = param.data.to(torch.bfloat16)
+
         # Pre-cache references to every lora_B weight tensor for O(adapter-count)
         # resets instead of a full named_modules walk.
         self._lora_b_weights: list[Tensor] = []
@@ -281,7 +417,45 @@ class SteeringEngine:
             if "lora_B" in name and hasattr(mod, "weight"):
                 self._lora_b_weights.append(mod.weight)
 
-        print(f"* LoRA adapters initialised (targets: {', '.join(targets)})")
+        # Summarise target paths by their distinct leaf names to keep output readable.
+        leaf_summary = sorted({t.rsplit(".", 1)[-1] for t in targets})
+        print(
+            f"* LoRA adapters initialised "
+            f"({len(targets)} modules, leaves: {', '.join(leaf_summary)})"
+        )
+
+    @staticmethod
+    def _patch_moe_config_for_fp8(model_id: str) -> None:
+        """Patch MoE config classes that lack ``intermediate_size``.
+
+        The transformers FP8 quantizer (``finegrained_fp8.py``) falls back to
+        ``config.intermediate_size`` when ``moe_intermediate_size`` is missing
+        on the *module-level* config object.  Some architectures (Qwen3.5 MoE)
+        define only ``moe_intermediate_size``, causing an ``AttributeError``.
+
+        We pre-fetch the model config and, if needed, inject a property that
+        aliases ``intermediate_size`` → ``moe_intermediate_size`` so the
+        quantizer can proceed.
+        """
+        from transformers import AutoConfig
+
+        try:
+            auto_cfg = AutoConfig.from_pretrained(model_id, trust_remote_code=True)
+            text_cfg = getattr(auto_cfg, "text_config", auto_cfg)
+            cfg_cls = type(text_cfg)
+
+            if hasattr(text_cfg, "moe_intermediate_size") and not hasattr(
+                text_cfg, "intermediate_size"
+            ):
+                cfg_cls.intermediate_size = property(
+                    lambda self: self.moe_intermediate_size
+                )
+                print(
+                    f"  [dim]Patched {cfg_cls.__name__}.intermediate_size → "
+                    f"moe_intermediate_size[/]"
+                )
+        except Exception:
+            pass  # Best-effort; if this fails, the original error will surface.
 
     def _build_quant_config(self, dtype: str) -> BitsAndBytesConfig | None:
         """Translate the user-facing QuantMode into a BitsAndBytesConfig."""
@@ -416,10 +590,27 @@ class SteeringEngine:
 
     def list_steerable_components(self) -> list[str]:
         """Return sorted component names across all layers (handles hybrid architectures)."""
+        if self._cached_components is not None:
+            return self._cached_components
         components: set[str] = set()
         for idx in range(len(self.transformer_layers)):
             components.update(self.steerable_modules(idx).keys())
         return sorted(components)
+
+    def get_n_layers(self) -> int:
+        """Return number of transformer layers, using cache if model is unloaded."""
+        if self._cached_n_layers is not None:
+            return self._cached_n_layers
+        return len(self.transformer_layers)
+
+    def prepare_for_unload(self):
+        """Cache metadata needed by the optimizer before freeing the HF model.
+
+        Must be called before setting ``engine.model = None`` for the vLLM
+        phase transition.
+        """
+        self._cached_n_layers = len(self.transformer_layers)
+        self._cached_components = self.list_steerable_components()
 
     # ------------------------------------------------------------------
     # MoE expert routing helpers
@@ -608,6 +799,8 @@ class SteeringEngine:
             trust_remote_code=self.trusted_models.get(self.config.model.model_id),
             **extra,
         )
+        if self.config.model.quant_method == QuantMode.FP8 and not self.config.model.skip_fp8_dequant:
+            self._dequant_fp8_to_bf16()
         self._init_adapters()
         self._init_expert_routing()
         self.needs_reload = False

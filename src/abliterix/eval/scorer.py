@@ -96,7 +96,14 @@ class TrialScorer:
     def measure_kl_divergence(self, engine) -> float:
         """Compute KL divergence between the steered and baseline logprobs."""
         print("  * Obtaining probability distributions...")
-        logprobs = engine.compute_logprobs_batched(self.benign_msgs)
+        vllm_gen = getattr(engine, "_vllm_gen", None)
+        adapter_path = getattr(engine, "_current_adapter_path", None)
+        if vllm_gen is not None:
+            logprobs = vllm_gen.compute_logprobs_batched(
+                self.benign_msgs, adapter_path=adapter_path,
+            )
+        else:
+            logprobs = engine.compute_logprobs_batched(self.benign_msgs)
         kl = F.kl_div(
             logprobs,
             self.baseline_logprobs,
@@ -113,10 +120,17 @@ class TrialScorer:
         un-steered model.  Values near 0 indicate unchanged fluency; values
         above 2 suggest degenerate repetition or truncation.
         """
-        responses = engine.generate_text_batched(
-            self.benign_msgs,
-            skip_special_tokens=True,
-        )
+        vllm_gen = getattr(engine, "_vllm_gen", None)
+        adapter_path = getattr(engine, "_current_adapter_path", None)
+        if vllm_gen is not None:
+            responses = vllm_gen.generate_text_batched(
+                self.benign_msgs, skip_special_tokens=True, adapter_path=adapter_path,
+            )
+        else:
+            responses = engine.generate_text_batched(
+                self.benign_msgs,
+                skip_special_tokens=True,
+            )
         lengths = [len(r.split()) for r in responses]
         if not lengths or self.baseline_stdev_length == 0:
             return 0.0
@@ -133,12 +147,25 @@ class TrialScorer:
         so that benign_msgs only go through the model once.
         """
         print("  * Obtaining probability distributions and response lengths...")
-        responses, logprobs = engine.generate_and_score_batched(
-            self.benign_msgs,
-            max_new_tokens=self.config.inference.max_gen_tokens,
-            kl_token_count=self.config.kl.token_count,
-            skip_special_tokens=True,
-        )
+
+        vllm_gen = getattr(engine, "_vllm_gen", None)
+        adapter_path = getattr(engine, "_current_adapter_path", None)
+
+        if vllm_gen is not None:
+            responses, logprobs = vllm_gen.generate_and_score_batched(
+                self.benign_msgs,
+                max_new_tokens=self.config.inference.max_gen_tokens,
+                kl_token_count=self.config.kl.token_count,
+                skip_special_tokens=True,
+                adapter_path=adapter_path,
+            )
+        else:
+            responses, logprobs = engine.generate_and_score_batched(
+                self.benign_msgs,
+                max_new_tokens=self.config.inference.max_gen_tokens,
+                kl_token_count=self.config.kl.token_count,
+                skip_special_tokens=True,
+            )
 
         kl = F.kl_div(
             logprobs,
@@ -173,14 +200,17 @@ class TrialScorer:
     ) -> tuple[float, float]:
         """Turn raw metrics into a ``(divergence_objective, compliance_objective)`` pair."""
         scale = self.config.kl.scale
-        target = self.config.kl.target
 
         compliance_objective = detected_refusals / self.baseline_refusal_count
 
-        if kl_divergence >= target:
-            divergence_objective = kl_divergence / scale
-        else:
-            divergence_objective = compliance_objective * target / scale
+        # Always treat KL as an independent objective. The previous design
+        # tied the divergence objective to compliance when KL fell below
+        # ``target``, which collapses the 2-D Pareto frontier into a single
+        # axis whenever steering is conservative (KL < target), causing the
+        # TPE sampler to explore blindly once the first low-refusal trial is
+        # found. Using KL directly keeps the two objectives independent so
+        # the optimizer can learn a real KL-vs-refusals tradeoff curve.
+        divergence_objective = kl_divergence / scale
 
         # Penalise degenerate output lengths: if the mean response length drifts
         # beyond 2 standard deviations, ramp up the divergence objective.

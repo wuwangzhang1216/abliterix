@@ -210,6 +210,15 @@ def _handle_existing_checkpoint(
 # ---------------------------------------------------------------------------
 
 
+def _speculators_available() -> bool:
+    """Check if the speculators library is installed."""
+    try:
+        from speculators.data_generation import VllmHiddenStatesGenerator  # noqa: F401
+        return True
+    except ImportError:
+        return False
+
+
 def _auto_batch_size(
     engine: SteeringEngine, benign_msgs: list[ChatMessage], config: AbliterixConfig
 ) -> int:
@@ -438,11 +447,7 @@ def run():
             return
         config, storage = result
 
-    engine = SteeringEngine(config)
-    print()
-    report_memory()
-
-    # Load steering-vector source datasets.
+    # Load steering-vector source datasets (needed early for speculators path).
     print()
     print(f"Loading benign prompts from [bold]{config.benign_prompts.dataset}[/]...")
     benign_msgs = load_prompt_dataset(config, config.benign_prompts)
@@ -452,6 +457,31 @@ def run():
     print(f"Loading target prompts from [bold]{config.target_prompts.dataset}[/]...")
     target_msgs = load_prompt_dataset(config, config.target_prompts)
     print(f"* [bold]{len(target_msgs)}[/] prompts loaded")
+
+    # ----- speculators fast path (vLLM backend only) -----
+    # Extract hidden states with vLLM tensor parallelism BEFORE loading
+    # the HF model.  This avoids the slow HF pipeline-parallel forward
+    # passes (~4 tok/s) and uses all GPUs simultaneously (~50+ tok/s).
+    _precomputed_benign_states = None
+    _precomputed_target_states = None
+    if config.model.backend == "vllm" and _speculators_available():
+        from .core.speculators_backend import extract_hidden_states_speculators
+
+        print()
+        print("[bold]Fast hidden state extraction (speculators + vLLM TP)[/]")
+        print("* Extracting residuals for benign prompts...")
+        _precomputed_benign_states = extract_hidden_states_speculators(
+            config, benign_msgs,
+        )
+        print("* Extracting residuals for target prompts...")
+        _precomputed_target_states = extract_hidden_states_speculators(
+            config, target_msgs,
+        )
+        print()
+
+    engine = SteeringEngine(config)
+    print()
+    report_memory()
 
     if config.inference.batch_size == 0:
         config.inference.batch_size = _auto_batch_size(engine, benign_msgs, config)
@@ -475,10 +505,16 @@ def run():
         # Compute steering vectors from residual streams.
         print()
         print("Computing per-layer steering vectors...")
-        print("* Extracting residuals for benign prompts...")
-        benign_states = engine.extract_hidden_states_batched(benign_msgs)
-        print("* Extracting residuals for target prompts...")
-        target_states = engine.extract_hidden_states_batched(target_msgs)
+        if _precomputed_benign_states is not None:
+            print("* Using pre-extracted residuals (speculators)")
+            benign_states = _precomputed_benign_states
+            target_states = _precomputed_target_states
+            del _precomputed_benign_states, _precomputed_target_states
+        else:
+            print("* Extracting residuals for benign prompts...")
+            benign_states = engine.extract_hidden_states_batched(benign_msgs)
+            print("* Extracting residuals for target prompts...")
+            target_states = engine.extract_hidden_states_batched(target_msgs)
 
         print(f"* Vector method: [bold]{config.steering.vector_method.value}[/]")
         vectors = compute_steering_vectors(
@@ -532,11 +568,56 @@ def run():
         flush_memory()
 
         # Profile MoE expert routing if applicable.
+        # Skip for vLLM backend — expert routing is not supported in vLLM mode
+        # (only LoRA weight steering is applied).
         safety_experts: dict[int, list[tuple[int, float]]] | None = None
-        if engine.has_expert_routing():
+        if engine.has_expert_routing() and config.model.backend != "vllm":
             print()
             print("Profiling MoE expert activations...")
             safety_experts = engine.identify_safety_experts(benign_msgs, target_msgs)
+
+        # ----- vLLM backend: Phase transition -----
+        vllm_gen = None
+        projection_cache = None
+        if config.model.backend == "vllm":
+            from .core.vllm_backend import ProjectionCache, VLLMGenerator
+
+            print()
+            print("[bold]Phase transition: HF → vLLM[/]")
+
+            # Pre-compute LoRA projections while HF model is still loaded.
+            print("* Building LoRA projection cache...")
+            projection_cache = ProjectionCache.build(engine, vectors)
+
+            # Unload HF model to free VRAM for vLLM.
+            print("* Unloading HF model...")
+            engine.prepare_for_unload()
+            engine.model = None
+            flush_memory()
+            report_memory()
+
+            # Load model with vLLM tensor parallelism.
+            print()
+            print("Loading model with vLLM tensor parallelism...")
+            vllm_gen = VLLMGenerator(config)
+
+            # Attach vLLM generator and projection cache to engine
+            # so the optimizer can use them.
+            engine._vllm_gen = vllm_gen
+            engine._projection_cache = projection_cache
+            engine._current_adapter_path = None  # baseline = no adapter
+
+            # Re-capture baseline logprobs with vLLM so KL comparisons
+            # use the same backend (top-K approximate logprobs).
+            print("* Re-capturing baseline logprobs with vLLM...")
+            base_resp, scorer.baseline_logprobs = vllm_gen.generate_and_score_batched(
+                scorer.benign_msgs,
+                max_new_tokens=config.inference.max_gen_tokens,
+                kl_token_count=config.kl.token_count,
+                skip_special_tokens=True,
+                adapter_path=None,  # base model
+            )
+            print("  [green]Ok[/]")
 
         study = run_search(
             config, engine, scorer, vectors, safety_experts, storage,
