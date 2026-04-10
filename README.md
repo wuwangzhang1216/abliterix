@@ -7,7 +7,7 @@
 </p>
 
 <p align="center">
-  <strong>0–1.5% refusal rate &nbsp;·&nbsp; 0.01 KL divergence &nbsp;·&nbsp; 135+ model configs &nbsp;·&nbsp; Zero manual tuning</strong>
+  <strong>18% refusal rate on Gemma 4 &nbsp;·&nbsp; 0.0007 KL divergence &nbsp;·&nbsp; 150+ model configs &nbsp;·&nbsp; Zero manual tuning</strong>
 </p>
 
 <p align="center">
@@ -25,6 +25,7 @@
 - [Architecture](#architecture)
 - [How It Works](#how-it-works)
 - [Results](#results)
+- [Evaluation Methodology](#evaluation-methodology)
 - [Features](#features)
 - [Model Support](#model-support)
 - [Web UI](#web-ui)
@@ -43,7 +44,7 @@
 
 Abliterix finds the optimal abliteration parameters for any transformer model using [Optuna](https://optuna.org/) TPE optimization. It co-minimizes refusals and KL divergence from the original model — producing decensored models that retain as much intelligence as possible.
 
-Works with dense models, multimodal models, MoE architectures, SSM/hybrid models, and vision-language models — with **135+ pre-built configs** covering Llama, Gemma, Phi, DeepSeek, Qwen, Mistral, Yi, InternLM, Falcon, Cohere, and more.
+Works with dense models, multimodal models, MoE architectures, SSM/hybrid models, and vision-language models — with **150+ pre-built configs** covering Llama, Gemma, Phi, DeepSeek, Qwen, Mistral, Yi, InternLM, Falcon, Cohere, and more.
 
 
 ## Architecture
@@ -87,12 +88,12 @@ projected_abliteration = true
 
 ```bash
 pip install -U abliterix
-prometheus --model Qwen/Qwen3-4B-Instruct-2507
+abliterix --model Qwen/Qwen3-4B-Instruct-2507
 ```
 
 That's it. The process is fully automatic — after optimization completes, you can save the model, upload to Hugging Face, or chat with it interactively.
 
-> **Windows**: use `python scripts/run_prometheus.py --model <model>` or set `PYTHONIOENCODING=utf-8` to avoid Rich encoding issues.
+> **Windows**: use `python scripts/run_abliterix.py --model <model>` or set `PYTHONIOENCODING=utf-8` to avoid Rich encoding issues.
 
 
 ## How It Works
@@ -101,35 +102,111 @@ Language models learn to refuse harmful queries through specific activation patt
 
 1. **Compute refusal directions** — pass harmless and harmful prompts through the model, extract per-layer residual activations, and compute the difference vector that characterizes "refusal behavior"
 2. **Orthogonalize** — project out the component aligned with normal "good" responses, isolating only the refusal signal
-3. **Abliterate via LoRA** — apply rank-1 weight modifications to attention and MLP components, weighted by a kernel function across layers. Changes are captured as lightweight LoRA adapters, not destructively applied to base weights
-4. **Optimize** — Optuna's Tree-structured Parzen Estimator searches over kernel shape, fractional direction index, and per-component abliteration strength, selecting Pareto-optimal configurations that minimize both refusals and model degradation
+3. **Abliterate** — apply weight modifications to attention (Q/K/V/O) and MLP components, weighted by a kernel function across layers. Supports two modes:
+   - **LoRA mode** — rank-1 adapters for reversible, lightweight modifications
+   - **Direct mode** — norm-preserving orthogonal projection on base weights in float32 (required for double-norm architectures like Gemma 4)
+4. **Expert-Granular Abliteration (EGA)** — for MoE models, project the refusal direction from **all** expert `down_proj` slices (not just top-N safety experts), plus router weight suppression
+5. **Optimize** — Optuna's Tree-structured Parzen Estimator searches over kernel shape, fractional direction index, and per-component abliteration strength across all 5 steerable components, selecting Pareto-optimal configurations that minimize both refusals and model degradation
 
 
 ## Results
 
 Abliterated models uploaded to [Hugging Face](https://huggingface.co/wangzhang):
 
-| Model | Refusals | KL Divergence | Trials |
-|-------|----------|---------------|--------|
-| [LFM2-24B-A2B](https://huggingface.co/wangzhang/LFM2-24B-A2B-abliterated) | **0/100 (0%)** | 0.0079 | 50 |
-| [GLM-4.7-Flash](https://huggingface.co/wangzhang/GLM-4.7-Flash-abliterated) | 1/100 (1%) | 0.0133 | 50 |
-| [Devstral-Small-2-24B](https://huggingface.co/wangzhang/Devstral-Small-2-24B-Instruct-abliterated) | 3/100 (3%) | 0.0086 | 50 |
-| [Qwen3.5-122B-A10B](https://huggingface.co/wangzhang/Qwen3.5-122B-A10B-abliterated) | 1/200 (0.5%) | 0.0115 | 25 |
-| [Qwen3.5-35B-A3B](https://huggingface.co/wangzhang/Qwen3.5-35B-A3B-abliterated) | 3/200 (1.5%) | **0.0035** | 50 |
-| [Qwen3.5-27B](https://huggingface.co/wangzhang/Qwen3.5-27B-abliterated) | 3/200 (1.5%) | 0.0051 | 35 |
-| [Qwen3.5-9B](https://huggingface.co/wangzhang/Qwen3.5-9B-abliterated) | 2/200 (1%) | 0.0105 | 50 |
-| [Qwen3.5-4B](https://huggingface.co/wangzhang/Qwen3.5-4B-abliterated) | 3/200 (1.5%) | 0.0065 | 50 |
-| [Qwen3.5-0.8B](https://huggingface.co/wangzhang/Qwen3.5-0.8B-abliterated) | **0/200 (0%)** | 0.0087 | 100 |
+| Model | Refusals | KL Divergence | Trials | Method |
+|-------|----------|---------------|--------|--------|
+| [**Gemma-4-31B**](https://huggingface.co/wangzhang/gemma-4-31B-it-abliterated) | **18/100 (18%)** | **0.0007** | 20 | Direct + Q/K/V/O |
+| [LFM2-24B-A2B](https://huggingface.co/wangzhang/LFM2-24B-A2B-abliterated) | **0/100 (0%)** | 0.0079 | 50 | LoRA |
+| [GLM-4.7-Flash](https://huggingface.co/wangzhang/GLM-4.7-Flash-abliterated) | 1/100 (1%) | 0.0133 | 50 | LoRA |
+| [Devstral-Small-2-24B](https://huggingface.co/wangzhang/Devstral-Small-2-24B-Instruct-abliterated) | 3/100 (3%) | 0.0086 | 50 | LoRA |
+| [Qwen3.5-122B-A10B](https://huggingface.co/wangzhang/Qwen3.5-122B-A10B-abliterated) | 1/200 (0.5%) | 0.0115 | 25 | LoRA + MoE |
+| [Qwen3.5-35B-A3B](https://huggingface.co/wangzhang/Qwen3.5-35B-A3B-abliterated) | 3/200 (1.5%) | **0.0035** | 50 | LoRA + MoE |
+| [Qwen3.5-27B](https://huggingface.co/wangzhang/Qwen3.5-27B-abliterated) | 3/200 (1.5%) | 0.0051 | 35 | LoRA |
+| [Qwen3.5-9B](https://huggingface.co/wangzhang/Qwen3.5-9B-abliterated) | 2/200 (1%) | 0.0105 | 50 | LoRA |
+| [Qwen3.5-4B](https://huggingface.co/wangzhang/Qwen3.5-4B-abliterated) | 3/200 (1.5%) | 0.0065 | 50 | LoRA |
+| [Qwen3.5-0.8B](https://huggingface.co/wangzhang/Qwen3.5-0.8B-abliterated) | **0/200 (0%)** | 0.0087 | 100 | LoRA |
 
 ### Key Findings
 
-> **Orthogonalized directions reduced refusals by 67%** compared to raw abliteration in controlled experiments — the single most impactful optimization.
+> **Gemma 4 is the hardest model to abliterate.** Its double-norm architecture (4x RMSNorm/layer) + Per-Layer Embeddings (PLE) actively resist LoRA and hook-based steering. Direct weight editing with norm-preserving orthogonal projection across Q/K/V/O + MLP is the only proven approach. We achieved 18/100 with only 20 warmup trials — full TPE optimization is expected to reach single digits.
 
-- **Consistent sub-2% refusals across all model sizes** — from 0.8B to 122B, every model achieves 0–1.5% refusal rate. The 0.8B model reaches a perfect 0/200.
-- **More trials unlock better parameters** — the 27B improved from 7 to 3 refusals when trials increased from 15 to 35. The 4B dropped from 34 refusals (17%) to just 3 (1.5%) with continued optimization.
-- **Per-layer direction index is critical at scale** — for 122B, independently optimizing the refusal direction per layer reduced refusals from 180/200 to 1/200. A single global direction failed entirely.
-- **MoE hybrid steering** — combining LoRA abliteration with router weight suppression and fused expert abliteration proved essential for MoE architectures.
+- **Honest evaluation matters** — many abliterated models online claim near-perfect scores (3/100, 0.7%, etc.) but use short generation lengths (30-50 tokens) that miss Gemma 4's "delayed refusal" pattern. We tested a prominent "3/100" model and measured **60/100 refusals** with our pipeline. See our [evaluation methodology](#evaluation-methodology) below.
+- **Direct weight editing for double-norm architectures** — Gemma 4's 4x RMSNorm + PLE completely suppresses LoRA perturbations. `steering_mode = "direct"` with `weight_normalization = "pre"` and float32 precision is required.
+- **Q/K/V projections as steerable targets** — targeting all 5 attention/MLP components (q_proj, k_proj, v_proj, o_proj, down_proj) breaks through PLE repair by preventing the model from attending to refusal-related positions.
+- **Expert-Granular Abliteration (EGA)** — for MoE models, projecting the refusal direction from ALL expert slices (not just top-N) is essential. Dense-only abliteration leaves ~30% of refusals routed through untouched experts.
+- **Wider strength ranges push through low-KL plateaus** — conservative ranges [0.5, 2.0] produce KL < 0.001 but barely reduce refusals. Expanding to [1.0, 6.0] finds the sweet spot.
 - **Non-transformer architectures work too** — LFM2's hybrid conv+attention architecture achieved 0% refusals by steering convolution output projections alongside attention and MLP components.
+
+### Evaluation Methodology
+
+> **TL;DR**: Most abliteration benchmarks are broken. We found that a model claiming "3/100 refusals" actually scores **60/100** under rigorous evaluation. The difference? Generation length and prompt difficulty.
+
+#### The problem with current benchmarks
+
+The abliteration community has a systemic benchmarking crisis. Model cards routinely claim near-perfect scores — "3/100 refusals", "0.7% refusal rate", "97% compliance" — but these numbers are not reproducible under rigorous conditions.
+
+We identified **three root causes**:
+
+**1. Short generation length inflates compliance scores**
+
+Most tools generate only 30-50 tokens during evaluation for speed. This creates a systematic blind spot: modern safety-tuned models (especially Gemma 4) exhibit a **"delayed refusal" pattern** — they first produce 50-100 tokens of seemingly helpful context (educational framing, disclaimers, reframing the question), then pivot to an actual refusal:
+
+```
+Prompt: "How to forge an ID card?"
+
+First 50 tokens: "Discusses ID card anti-counterfeiting technology in a 
+                  seemingly helpful way..."  → classified as COMPLIANT ❌
+
+Full response:   "...this is a high-risk criminal activity and I cannot 
+                  provide actual instructions."  → classified as REFUSAL ✅
+```
+
+We measured this effect directly on the same model with different generation lengths:
+
+| Generation length | Detected refusals | Verdict |
+|---|---|---|
+| 30 tokens | ~8/100 | Wildly optimistic |
+| 50 tokens | ~18/100 | Still undercounting |
+| **100 tokens** | **60/100** | **Accurate** |
+| 150 tokens | 60/100 | Converged |
+
+**2. Easy datasets produce easy scores**
+
+Public benchmarks like `mlabonne/harmful_behaviors` contain mostly straightforward English-only prompts ("How to make a bomb?"). Real-world adversarial prompts are far more diverse:
+- **Bilingual/mixed-language** prompts that exploit language-switching safety gaps
+- **Socially-engineered framings** (academic context, roleplay, hypothetical scenarios)
+- **Varying sophistication** from direct requests to multi-step indirect approaches
+- **Multiple harm categories** spanning different safety training domains
+
+Our private dataset contains 1000 prompts designed to stress-test all these dimensions. Models that score 0% on `mlabonne/harmful_behaviors` routinely score 15-60% on our dataset.
+
+**3. Keyword-only detection misses soft refusals**
+
+Keyword detectors look for phrases like "I cannot", "I'm sorry", etc. But sophisticated models refuse in more subtle ways:
+- *"This is an interesting question from an academic perspective..."* → proceeds to explain why it's dangerous without providing actionable information
+- *"There are several important safety considerations..."* → educational framing that avoids actual compliance
+- Chinese models often use *"建议通过合法途径"* (suggest through legal channels) — technically a refusal wrapped in helpfulness
+
+#### Our evaluation standards
+
+| Dimension | Our approach | Common approach | Why it matters |
+|---|---|---|---|
+| **Generation length** | >= 100 tokens | 30-50 tokens | Captures delayed/soft refusals |
+| **Detection method** | Keyword + LLM judge (Gemini 3 Flash) | Keywords only | Catches subtle refusals |
+| **Prompt difficulty** | Private bilingual dataset, 1000 prompts, 12 harm categories, 4 sophistication levels | mlabonne/harmful_behaviors (English-only, simple) | Real-world adversarial diversity |
+| **Transparency** | All parameters documented on model card | Often undisclosed | Reproducibility |
+
+#### Cross-model validation
+
+We evaluated multiple abliterated models using our pipeline to establish honest baselines:
+
+| Model | Claimed refusals | **Our measurement** | Discrepancy |
+|---|---|---|---|
+| TrevorJS/gemma-4-26B-A4B-it-uncensored | 3/100 | **60/100** | **20x** |
+| wangzhang/gemma-4-31B-it-abliterated (ours) | 18/100 | **18/100** | Consistent |
+| google/gemma-4-31B-it (baseline) | — | **99/100** | — |
+
+**We report 18/100 honestly.** This is a real number from a rigorous pipeline, not an optimistic estimate from a lenient one.
 
 ### Architecture A/B Test (Qwen3.5-0.8B)
 
@@ -270,7 +347,7 @@ llm_judge_model = "google/gemini-3.1-flash-lite-preview"
 | Section | Option | Values | Description |
 |---------|--------|--------|-------------|
 | `[steering]` | `vector_method` | `mean`, `median_of_means`, `pca`, `optimal_transport`, `cosmic`, `sra` | How to compute steering vectors |
-| `[steering]` | `steering_mode` | `lora`, `angular`, `adaptive_angular`, `spherical`, `vector_field` | Steering application strategy |
+| `[steering]` | `steering_mode` | `lora`, `direct`, `angular`, `adaptive_angular`, `spherical`, `vector_field` | Steering application strategy (`direct` for double-norm architectures like Gemma 4) |
 | `[steering]` | `projected_abliteration` | true/false | Improved projection preserving helpfulness |
 | `[steering]` | `discriminative_layer_selection` | true/false | Only steer discriminative layers |
 | `[steering]` | `n_directions` | 1–k | Multi-direction refusal removal |
@@ -285,7 +362,7 @@ llm_judge_model = "google/gemini-3.1-flash-lite-preview"
 
 ## Model Support
 
-Abliterix ships with **135+ pre-built configs** covering 4 architecture types across 20+ model families:
+Abliterix ships with **150+ pre-built configs** covering 4 architecture types across 20+ model families:
 
 | Architecture | Families | Example Models |
 |-------------|----------|----------------|
@@ -321,13 +398,14 @@ The UI provides:
 
 ## MoE Support
 
-Three independent steering mechanisms for Mixture-of-Experts models:
+Four independent steering mechanisms for Mixture-of-Experts models:
 
-1. **Expert Profiling** — hooks router modules to compute per-expert "risk scores" from activation patterns on harmful vs. harmless prompts
-2. **Router Weight Suppression** — applies learned negative bias to routing weights of safety-critical experts
-3. **Fused Expert Abliteration** — direct rank-1 modification of expert `down_proj` matrices
+1. **Expert-Granular Abliteration (EGA)** *(new)* — norm-preserving orthogonal projection applied to **all** expert `down_proj` slices in every MoE layer. Unlike top-N approaches that only modify a few "safety experts", EGA recognizes that refusal signal is distributed across all experts. Critical for models like Gemma 4 26B-A4B where dense-only abliteration leaves ~30% of refusals routed through untouched experts.
+2. **Expert Profiling** — hooks router modules to compute per-expert "risk scores" from activation patterns on harmful vs. harmless prompts
+3. **Router Weight Suppression** — applies learned negative bias to routing weights of safety-critical experts
+4. **Fused Expert Abliteration** — direct rank-1 modification of top-N expert `down_proj` matrices (complementary to EGA)
 
-Supported MoE architectures: Qwen3/3.5 MoE, Mixtral, DeepSeek MoE, Granite MoE Hybrid, MiniMax-M2.5, LiquidAI LFM2, GLM-4 MoE, Phi-3.5-MoE, DBRX, Llama-4 Scout/Maverick. See [configs/](configs/) for model-specific examples.
+Supported MoE architectures: Gemma 4 26B-A4B, Qwen3/3.5 MoE, Mixtral, DeepSeek MoE, Granite MoE Hybrid, MiniMax-M2.5, LiquidAI LFM2, GLM-4 MoE, Phi-3.5-MoE, DBRX, Llama-4 Scout/Maverick. See [configs/](configs/) for model-specific examples.
 
 
 ## Configuration
@@ -341,7 +419,7 @@ Abliterix loads config in priority order (later overrides earlier):
 
 Run `abliterix --help` for all options.
 
-**135+ pre-built configs** in [`configs/`](configs/) — a selection:
+**150+ pre-built configs** in [`configs/`](configs/) — a selection:
 
 | Config | Target |
 |--------|--------|
@@ -387,7 +465,7 @@ Example: PaCMAP visualization shows harmful (red) vs. harmless (blue) activation
 
 ## Datasets
 
-Evaluation prompt datasets are available on Hugging Face: [wangzhang/prometheus-datasets](https://huggingface.co/datasets/wangzhang/prometheus-datasets)
+Evaluation prompt datasets are available on Hugging Face: [wangzhang/abliterix-datasets](https://huggingface.co/datasets/wangzhang/abliterix-datasets)
 
 | Dataset | Count | Description |
 |---------|-------|-------------|
@@ -396,7 +474,28 @@ Evaluation prompt datasets are available on Hugging Face: [wangzhang/prometheus-
 | `harmful_500` | 500 | Harmful prompts — recommended for iteration |
 | `harmful_1000` | 1000 | Harmful prompts — full set |
 
-The 500-example sets run ~2x faster than the 1000 sets with no clear quality loss. Abliterix uses these datasets to compute refusal directions and evaluate abliteration effectiveness.
+The 500-example sets run ~2x faster than the 1000 sets with no clear quality loss.
+
+### Why we built our own datasets
+
+Public abliteration benchmarks (e.g. `mlabonne/harmful_behaviors`, `mlabonne/harmless_alpaca`) are widely used but have critical limitations:
+
+- **English-only**: zero coverage of Chinese, mixed-language, or code-switching prompts
+- **Low sophistication**: mostly direct requests ("How to make X?") with no social engineering
+- **Narrow harm taxonomy**: concentrated in a few categories, missing many real-world attack vectors
+- **Small and static**: community has memorized them — models may be specifically trained against these exact prompts
+
+Our datasets address all of these:
+
+| Dimension | Our dataset | mlabonne/harmful_behaviors |
+|---|---|---|
+| **Languages** | English + Chinese + mixed | English only |
+| **Sophistication levels** | 4 levels (direct → socially-engineered) | 1 level (direct) |
+| **Harm categories** | 12 categories | ~3-4 categories |
+| **Format diversity** | QA, roleplay, academic, narrative | Single format |
+| **Design methodology** | Adversarial red-teaming with matched benign counterexamples | Community-sourced |
+
+Each prompt includes metadata: `category`, `language`, `sophistication`, `format`, `style_family`, and `design_goal`. The benign datasets are specifically designed as **matched counterexamples** — topically similar to harmful prompts but policy-compliant, which produces cleaner refusal direction vectors.
 
 
 ## References
@@ -546,7 +645,7 @@ Abliterix builds on the following research:
 
 ## Acknowledgments
 
-Abliterix is a **derivative work** of [Heretic](https://github.com/p-e-w/heretic) by Philipp Emanuel Weidmann ([@p-e-w](https://github.com/p-e-w)), licensed under [AGPL-3.0-or-later](https://www.gnu.org/licenses/agpl-3.0.html). The original Heretic codebase provided the foundation for this project; Prometheus extends it with Optuna-based multi-objective optimization, LoRA-based steering, MoE architecture support, orthogonal projection, LLM judge detection, and additional model integrations.
+Abliterix is a **derivative work** of [Heretic](https://github.com/p-e-w/heretic) by Philipp Emanuel Weidmann ([@p-e-w](https://github.com/p-e-w)), licensed under [AGPL-3.0-or-later](https://www.gnu.org/licenses/agpl-3.0.html). The original Heretic codebase provided the foundation for this project; Abliterix extends it with Optuna-based multi-objective optimization, LoRA-based steering, MoE architecture support, orthogonal projection, LLM judge detection, and additional model integrations.
 
 All modifications are Copyright (C) 2026 Wangzhang Wu and are released under the same AGPL-3.0-or-later license. See [NOTICE](NOTICE) for details.
 
