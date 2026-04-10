@@ -313,6 +313,48 @@ class SteeringConfig(BaseModel):
         description="Optuna search interval [lo, hi] for peak steering weight.",
     )
 
+    component_strength_ranges: dict[str, list[float]] = Field(
+        default_factory=dict,
+        description=(
+            "Per-component override for ``strength_range``. Mapping of "
+            'component name (e.g. ``"mlp.down_proj"``) to ``[lo, hi]``. '
+            "When a component appears here, the optimizer uses the per-component "
+            "interval instead of the global ``strength_range`` for that "
+            "component's ``max_weight`` parameter. Useful for MoE models where "
+            "different components want very different strength regimes — e.g. "
+            "gpt-oss benefits from weak attention steering + strong EGA on "
+            "fused expert ``mlp.down_proj``."
+        ),
+    )
+
+    min_weight_frac_max: float = Field(
+        default=1.0,
+        description=(
+            "Upper bound for the random sampling of ``component.min_weight`` "
+            "(expressed as a fraction of ``max_weight``). Default 1.0 keeps "
+            "the historical behaviour where the optimizer may sample any "
+            "min_frac in [0, 1], which can produce nearly-flat strength "
+            "profiles (min ≈ max → every layer at peak strength). Set this "
+            "below 1.0 to bias the search toward 'sharp peak' profiles where "
+            "the steering is concentrated near ``max_weight_position``. "
+            "Empirically (gpt-oss-20b v1), all winning trials had min_frac < "
+            "0.34 — setting this to ~0.4 raises the warmup hit rate "
+            "dramatically without removing any known sweet spot."
+        ),
+    )
+
+    component_min_frac_max: dict[str, float] = Field(
+        default_factory=dict,
+        description=(
+            "Per-component override for ``min_weight_frac_max``. Useful when "
+            "one component (e.g. EGA on fused MoE experts) has an even "
+            "tighter sweet spot than the others. For gpt-oss-20b's "
+            "``mlp.down_proj``, the v1 winner had min_frac = 0.02; setting "
+            "this component's cap to ~0.10 makes random search ~10x more "
+            "likely to land in the productive region."
+        ),
+    )
+
     outlier_quantile: float = Field(
         default=1.0,
         description=(

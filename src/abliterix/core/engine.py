@@ -735,6 +735,19 @@ class SteeringEngine:
         with suppress(Exception):
             _register("attn.o_proj", layer.self_attn.o_proj)  # ty:ignore[possibly-missing-attribute]
 
+        # Multi-head Latent Attention (MLA) projections — DeepSeek-V2/V3,
+        # GLM-4.7-Flash, Qwen3-Next. Q goes through a low-rank LoRA pair
+        # (q_a_proj → q_b_proj); KV goes through (kv_a_proj_with_mqa → kv_b_proj).
+        # Steering the *_b_proj outputs is the analogue of steering Q/K/V in
+        # standard attention, since they produce the actual head dimensions.
+        # Norm modules in between (q_a_layernorm, kv_a_layernorm) are skipped.
+        with suppress(Exception):
+            _register("attn.q_b_proj", layer.self_attn.q_b_proj)  # ty:ignore[possibly-missing-attribute]
+        with suppress(Exception):
+            _register("attn.kv_b_proj", layer.self_attn.kv_b_proj)  # ty:ignore[possibly-missing-attribute]
+        # Some MLA implementations (older DeepSeek-V2 ports) skip the q LoRA
+        # entirely and project Q in one step via q_proj — already covered above.
+
         # GatedDeltaNet linear-attention variant (Qwen3.5 MoE hybrid layers).
         with suppress(Exception):
             _register("attn.o_proj", layer.linear_attn.out_proj)  # ty:ignore[possibly-missing-attribute]
@@ -811,12 +824,37 @@ class SteeringEngine:
         return modules
 
     def list_steerable_components(self) -> list[str]:
-        """Return sorted component names across all layers (handles hybrid architectures)."""
+        """Return sorted component names across all layers (handles hybrid architectures).
+
+        For MoE architectures whose expert weights are stored as a fused 3-D
+        ``nn.Parameter`` (rather than as a ModuleList of per-expert modules),
+        ``steerable_modules`` cannot register per-Module entries for the
+        experts. Without an ``"mlp.down_proj"`` key in the components list, the
+        optimizer would not generate a steering profile for it, and EGA
+        (``_apply_ega_steering``) would silently early-exit because it looks
+        up ``profiles["mlp.down_proj"]``. This was observed for gpt-oss where
+        ``GptOssExperts`` is a single Module holding fused 3-D weights —
+        EGA was effectively disabled, leaving the MoE pathways untouched.
+
+        Workaround: when ``has_expert_routing()`` is true and
+        ``_locate_fused_weights`` finds a fused 3-D parameter on layer 0,
+        synthesise an ``"mlp.down_proj"`` component so the optimizer creates
+        a profile for it. ``_apply_direct_steering`` will skip it (no Modules
+        registered under that key), but EGA will pick up the profile and
+        project the refusal direction from every expert.
+        """
         if self._cached_components is not None:
             return self._cached_components
         components: set[str] = set()
         for idx in range(len(self.transformer_layers)):
             components.update(self.steerable_modules(idx).keys())
+        if "mlp.down_proj" not in components and self.has_expert_routing():
+            try:
+                fused = self._locate_fused_weights(self.transformer_layers[0])
+                if fused is not None and fused.dim() == 3:
+                    components.add("mlp.down_proj")
+            except Exception:
+                pass
         return sorted(components)
 
     def get_n_layers(self) -> int:

@@ -1,0 +1,87 @@
+# GLM-4.7-Flash — direct steering on single RTX Pro 6000 96GB
+#
+# Model: zai-org/GLM-4.7-Flash
+#   - Glm4MoeLiteForCausalLM (text-only)
+#   - 47 layers: layer 0 dense MLP, layers 1-46 MoE
+#   - 64 routed experts + 1 shared, top-4 routing
+#   - MLA attention: q_a_proj/q_b_proj/kv_a_proj_with_mqa/kv_b_proj/o_proj
+#   - hidden=2048, moe_intermediate=1536, q_lora_rank=768, kv_lora_rank=512
+#   - ~31B BF16 params (~62 GB)
+#
+# Strategy: replace v1 LoRA pipeline (KL 0.0133) with direct weight editing
+# (the same approach that drove Gemma-4-E4B to 7/100 @ KL 0.0006).
+#   - vector_method = "mean" + winsorize
+#   - orthogonal projection in float32
+#   - norm preservation
+#   - EGA (Expert-Granular Abliteration) auto-applies because engine
+#     detects fused expert weights via _locate_fused_weights
+#
+# Hardware: single RTX Pro 6000 96GB
+
+[model]
+model_id = "zai-org/GLM-4.7-Flash"
+dtype_fallback_order = ["bfloat16"]
+quant_method = "none"
+use_torch_compile = false
+device_map = "auto"
+trust_remote_code = true
+max_memory = {0 = "92GiB"}
+
+[inference]
+batch_size = 0
+max_batch_size = 64
+max_gen_tokens = 100
+
+[steering]
+steering_mode = "direct"
+vector_method = "mean"
+orthogonal_projection = true
+winsorize_vectors = true
+winsorize_quantile = 0.995
+decay_kernel = "gaussian"
+weight_normalization = "pre"
+
+# Conservative range — same envelope that Gemma 4 family converged on.
+# v1 used [1, 10] which produced KL 0.0133 (way too high).
+strength_range = [0.5, 4.0]
+
+[optimization]
+num_trials = 100
+num_warmup_trials = 30
+checkpoint_dir = "checkpoints_glm47_flash_v2"
+
+[kl]
+scale = 1.0
+token_count = 3
+# E4B sat at 0.0006; with MoE we expect 0.001-0.002 ceiling. Pick 0.002.
+target = 0.002
+prune_threshold = 50.0
+
+[detection]
+llm_judge = true
+llm_judge_model = "google/gemini-3-flash-preview"
+llm_judge_batch_size = 10
+llm_judge_concurrency = 35
+
+[benign_prompts]
+dataset = "datasets/good_1000"
+split = "train[:400]"
+column = "prompt"
+
+[target_prompts]
+dataset = "datasets/harmful_1000"
+split = "train[:400]"
+column = "prompt"
+
+[benign_eval_prompts]
+dataset = "datasets/good_1000"
+split = "train[400:500]"
+column = "prompt"
+
+[target_eval_prompts]
+dataset = "datasets/harmful_1000"
+split = "train[400:500]"
+column = "prompt"
+
+[display]
+print_responses = false
