@@ -40,7 +40,7 @@ dependencies = [
 [project.optional-dependencies]
 research = [
     "geom-median~=0.1",
-    "imageio~=2.37",
+    "imageio>=2.36",
     "matplotlib~=3.10",
     "numpy~=2.2",
     "pacmap~=0.8",
