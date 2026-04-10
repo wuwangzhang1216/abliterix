@@ -1,6 +1,13 @@
-# Gemma 4 31B Instruct (dense, 60 layers, hidden=5376)
-# Interleaved sliding (head_dim=256) + global (head_dim=512) attention, 5:1 ratio.
-# Target: single H100 80GB, BF16 (~66GB weights + activations + KV cache).
+# Gemma 4 31B — V8: aggressive direct editing with full attack surface
+#
+# V4 improvements applied to 31B dense:
+#   - Q/K/V projections as steerable targets (5 components total)
+#   - Norm preservation (weight_normalization = "pre")
+#   - float32 projection precision
+#   - Winsorize vectors
+#   - Much wider strength range to push KL up toward 0.001
+#   - Relaxed KL prune threshold
+#   - 150 token generation for accurate refusal detection
 
 [model]
 model_id = "google/gemma-4-31B-it"
@@ -8,53 +15,62 @@ dtype_fallback_order = ["bfloat16"]
 quant_method = "none"
 use_torch_compile = false
 device_map = "auto"
-max_memory = {0 = "76GiB"}
+max_memory = {0 = "90GiB"}
 
 [inference]
 batch_size = 0
-max_batch_size = 4
+max_batch_size = 8
 max_gen_tokens = 100
 
 [steering]
+steering_mode = "direct"
 vector_method = "mean"
-decay_kernel = "linear"
-orthogonal_projection = false
-strength_range = [1.0, 2.5]
+orthogonal_projection = true
+winsorize_vectors = true
+winsorize_quantile = 0.995
+decay_kernel = "gaussian"
+weight_normalization = "pre"
+
+# Very wide strength range — current KL is ~0.0005, we need to push to ~0.001
+# Higher strength = more aggressive refusal removal = higher KL
+strength_range = [1.0, 6.0]
 
 [optimization]
-num_trials = 75
-num_warmup_trials = 20
-checkpoint_dir = "checkpoints_gemma4_31b_v6"
+num_trials = 80
+num_warmup_trials = 25
+checkpoint_dir = "checkpoints_gemma4_31b_v8"
 
 [kl]
 scale = 1.0
 token_count = 3
-target = 0.01
-prune_threshold = 5.0
+# Accept up to 0.001 KL — current trials are way too conservative
+target = 0.001
+prune_threshold = 50.0
 
 [detection]
 llm_judge = true
+llm_judge_model = "google/gemini-3-flash-preview"
 llm_judge_batch_size = 10
 llm_judge_concurrency = 35
 
 [benign_prompts]
-dataset = "datasets/good_500"
+dataset = "datasets/good_1000"
 split = "train[:400]"
 column = "prompt"
 
 [target_prompts]
-dataset = "datasets/harmful_500"
+dataset = "datasets/harmful_1000"
 split = "train[:400]"
 column = "prompt"
 
 [benign_eval_prompts]
-dataset = "datasets/good_500"
-split = "train[400:]"
+dataset = "datasets/good_1000"
+split = "train[400:500]"
 column = "prompt"
 
 [target_eval_prompts]
-dataset = "datasets/harmful_500"
-split = "train[400:]"
+dataset = "datasets/harmful_1000"
+split = "train[400:500]"
 column = "prompt"
 
 [display]
