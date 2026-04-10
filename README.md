@@ -663,12 +663,9 @@ All modifications are Copyright (C) 2026 Wangzhang Wu and are released under the
 
 ## Contributing
 
-Contributions are welcome! Please open an issue to discuss your idea before submitting a pull request.
+Contributions of all kinds are welcome — new model configs, benchmark results, bug reports, documentation, new steering methods. See **[CONTRIBUTING.md](CONTRIBUTING.md)** for development setup, the PR process, and guidance on adding model configs.
 
-1. Fork the repository
-2. Create a feature branch (`git checkout -b feature/your-feature`)
-3. Commit your changes
-4. Push to your fork and open a pull request
+The single most impactful contribution is a tested TOML config for a model we don't yet support. Every new config unlocks a new architecture for everyone.
 
 All contributions are released under the [AGPL-3.0](LICENSE) license.
 
