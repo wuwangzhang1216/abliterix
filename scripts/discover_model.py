@@ -5,7 +5,7 @@
 #
 # SPDX-License-Identifier: AGPL-3.0-or-later
 
-"""Discover any HuggingFace model's architecture for Prometheus integration.
+"""Discover any HuggingFace model's architecture for Abliterix integration.
 
 Run on a GPU machine to inspect the model's module tree, layer structure,
 MoE routing, and hidden-state behaviour.  The output tells us exactly which
@@ -481,7 +481,7 @@ def report_vram():
 # ── Main ────────────────────────────────────────────────────────────
 
 def main():
-    parser = argparse.ArgumentParser(description="Discover model architecture for Prometheus")
+    parser = argparse.ArgumentParser(description="Discover model architecture for Abliterix")
     parser.add_argument("--model", required=True, help="HuggingFace model ID")
     parser.add_argument("--skip-load", action="store_true", help="Only inspect config, skip model loading")
     args = parser.parse_args()

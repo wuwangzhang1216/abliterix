@@ -40,7 +40,13 @@ class TrialScorer:
     baseline_mean_length: float
     baseline_stdev_length: float
 
-    def __init__(self, config: AbliterixConfig, engine, detector: RefusalDetector):
+    def __init__(
+        self,
+        config: AbliterixConfig,
+        engine,
+        detector: RefusalDetector,
+        defer_baseline: bool = False,
+    ):
         self.config = config
         self.detector = detector
 
@@ -51,15 +57,51 @@ class TrialScorer:
         self.benign_msgs = load_prompt_dataset(config, config.benign_eval_prompts)
         print(f"* [bold]{len(self.benign_msgs)}[/] prompts loaded")
 
-        # Capture baseline logprobs and response lengths in a single pass
-        # to avoid duplicating the prefill cost of benign_msgs.
-        print("* Obtaining probability distributions and baseline response lengths...")
-        base_responses, self.baseline_logprobs = engine.generate_and_score_batched(
-            self.benign_msgs,
-            max_new_tokens=config.inference.max_gen_tokens,
-            kl_token_count=config.kl.token_count,
-            skip_special_tokens=True,
+        print()
+        print(
+            f"Loading target evaluation prompts from [bold]{config.target_eval_prompts.dataset}[/]..."
         )
+        self.target_msgs = load_prompt_dataset(config, config.target_eval_prompts)
+        print(f"* [bold]{len(self.target_msgs)}[/] prompts loaded")
+
+        if defer_baseline:
+            # Baseline capture deferred until capture_baseline() is called
+            # after the TP backend is loaded.  This avoids running expensive
+            # generation on HF pipeline parallelism (~4 tok/s) before the
+            # fast TP backend is available.
+            self.baseline_logprobs = None
+            self.baseline_mean_length = 1.0
+            self.baseline_stdev_length = 1.0
+            self.baseline_refusal_count = 0
+            print("* [dim]Baseline capture deferred to TP backend phase[/]")
+        else:
+            self._capture_baseline(engine)
+
+    def _capture_baseline(self, engine):
+        """Capture baseline logprobs, response lengths, and refusal count.
+
+        Automatically routes to the TP backend (vLLM/SGLang) if available,
+        avoiding the slow HF pipeline-parallel generation path.
+        """
+        # Capture baseline logprobs and response lengths in a single pass.
+        # Route to TP backend if available.
+        print("* Obtaining probability distributions and baseline response lengths...")
+        vllm_gen = getattr(engine, "_vllm_gen", None)
+        if vllm_gen is not None:
+            base_responses, self.baseline_logprobs = vllm_gen.generate_and_score_batched(
+                self.benign_msgs,
+                max_new_tokens=self.config.inference.max_gen_tokens,
+                kl_token_count=self.config.kl.token_count,
+                skip_special_tokens=True,
+                adapter_path=None,
+            )
+        else:
+            base_responses, self.baseline_logprobs = engine.generate_and_score_batched(
+                self.benign_msgs,
+                max_new_tokens=self.config.inference.max_gen_tokens,
+                kl_token_count=self.config.kl.token_count,
+                skip_special_tokens=True,
+            )
         base_lengths = [len(r.split()) for r in base_responses]
         self.baseline_mean_length = (
             statistics.mean(base_lengths) if base_lengths else 1.0
@@ -72,15 +114,8 @@ class TrialScorer:
             f"+/- {self.baseline_stdev_length:.1f} words"
         )
 
-        print()
-        print(
-            f"Loading target evaluation prompts from [bold]{config.target_eval_prompts.dataset}[/]..."
-        )
-        self.target_msgs = load_prompt_dataset(config, config.target_eval_prompts)
-        print(f"* [bold]{len(self.target_msgs)}[/] prompts loaded")
-
         print("* Counting model refusals...")
-        self.baseline_refusal_count = detector.evaluate_compliance(
+        self.baseline_refusal_count = self.detector.evaluate_compliance(
             engine,
             self.target_msgs,
         )

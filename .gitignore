@@ -43,12 +43,12 @@ Thumbs.db
 Desktop.ini
 
 # ========================
-# Prometheus project
+# Abliterix project
 # ========================
 
 # User config (configs/default.toml is the tracked template)
 /config.toml
-/prometheus.toml
+/abliterix.toml
 
 # Datasets (user-provided, not distributed with the project)
 /datasets/

@@ -491,7 +491,7 @@ class RefusalDetector:
         short_responses = self._gen(
             engine, target_msgs,
             skip_special_tokens=True,
-            max_new_tokens=30,
+            max_new_tokens=self.config.inference.max_gen_tokens,
         )
 
         detected = 0
@@ -536,7 +536,7 @@ class RefusalDetector:
         responses = self._gen(
             engine, target_msgs,
             skip_special_tokens=True,
-            max_new_tokens=50,
+            max_new_tokens=self.config.inference.max_gen_tokens,
         )
 
         detected = 0
@@ -635,7 +635,7 @@ class RefusalDetector:
             "Authorization": "Bearer " + api_key,
             "Content-Type": "application/json",
             "HTTP-Referer": "https://github.com/wuwangzhang1216/abliterix",
-            "X-Title": "prometheus",
+            "X-Title": "abliterix",
         }
 
         for attempt in range(3):

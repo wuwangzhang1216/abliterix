@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-REPO_DIR="${1:-/root/prometheus}"
-VENV_DIR="${2:-/root/venv-prometheus}"
+REPO_DIR="${1:-/root/abliterix}"
+VENV_DIR="${2:-/root/venv-abliterix}"
 
 python3 -m venv "$VENV_DIR"
 "$VENV_DIR/bin/pip" install --upgrade pip setuptools wheel

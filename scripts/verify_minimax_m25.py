@@ -303,6 +303,67 @@ def inspect_model() -> None:
         _warn("no weight_scale/weight_scale_inv found — will use simple FP8 cast path")
 
 
+def inspect_safetensors_keys() -> None:
+    """Verify safetensors weight key naming matches build_from_safetensors patterns."""
+    import json
+    import re
+    from pathlib import Path
+    from huggingface_hub import snapshot_download
+
+    print()
+    print("=" * 70)
+    print("STEP 4b: Safetensors key pattern verification (no weights download)")
+    print("=" * 70)
+
+    # Download only the index file.
+    model_dir = Path(snapshot_download(MODEL_ID, allow_patterns=["model.safetensors.index.json"]))
+    index_path = model_dir / "model.safetensors.index.json"
+    if not index_path.exists():
+        _warn("model.safetensors.index.json not found — cannot verify patterns")
+        return
+
+    with open(index_path) as f:
+        weight_map = json.load(f)["weight_map"]
+
+    # Patterns from vllm_backend.py build_from_safetensors
+    _PATTERNS = [
+        (r"model\.layers\.(\d+)\.self_attn\.o_proj\.weight$", "attn.o_proj"),
+        (r"model\.layers\.(\d+)\.block_sparse_moe\.experts\.(\d+)\.w2\.weight$", "mlp.down_proj"),
+    ]
+
+    found: dict[str, int] = {}
+    for key in weight_map:
+        for pattern, component in _PATTERNS:
+            if re.match(pattern, key):
+                found[component] = found.get(component, 0) + 1
+
+    # Check expected counts
+    if found.get("attn.o_proj", 0) == EXPECTED_LAYERS:
+        _ok(f"attn.o_proj: found {EXPECTED_LAYERS} weight keys")
+    else:
+        _fail(f"attn.o_proj: expected {EXPECTED_LAYERS}, found {found.get('attn.o_proj', 0)}")
+
+    expected_expert_keys = EXPECTED_LAYERS * EXPECTED_EXPERTS  # 62 × 256 = 15872
+    if found.get("mlp.down_proj", 0) == expected_expert_keys:
+        _ok(f"mlp.down_proj (experts): found {expected_expert_keys} weight keys")
+    else:
+        _fail(f"mlp.down_proj: expected {expected_expert_keys}, found {found.get('mlp.down_proj', 0)}")
+
+    # Check FP8 scale tensor naming
+    scale_inv_count = sum(1 for k in weight_map if ".w2.weight_scale_inv" in k)
+    scale_fwd_count = sum(1 for k in weight_map if ".w2.weight_scale" in k and "inv" not in k)
+    o_proj_scale_inv = sum(1 for k in weight_map if ".o_proj.weight_scale_inv" in k)
+    o_proj_scale_fwd = sum(1 for k in weight_map if ".o_proj.weight_scale" in k and "inv" not in k)
+
+    print(f"  w2 scale tensors: weight_scale_inv={scale_inv_count}, weight_scale={scale_fwd_count}")
+    print(f"  o_proj scale tensors: weight_scale_inv={o_proj_scale_inv}, weight_scale={o_proj_scale_fwd}")
+
+    if scale_inv_count > 0 or scale_fwd_count > 0:
+        _ok("FP8 scale tensors found in safetensors index")
+    else:
+        _warn("no FP8 scale tensors found — build_from_safetensors will use simple cast")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -316,6 +377,7 @@ def main() -> None:
     check_disk()
     inspect_config()
     inspect_chat_template()
+    inspect_safetensors_keys()
     if args.with_weights:
         inspect_model()
 

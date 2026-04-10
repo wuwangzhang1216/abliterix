@@ -1,6 +1,6 @@
 [project]
 name = "abliterix"
-version = "1.0.1"
+version = "1.1.0"
 description = "Automated model steering and alignment adjustment via LoRA-based optimization"
 readme = "README.md"
 license = "AGPL-3.0-or-later"
@@ -29,7 +29,7 @@ dependencies = [
     "huggingface-hub~=1.6",
     "kernels~=0.11",
     "optuna~=4.5",
-    "peft~=0.14",
+    "peft~=0.18",
     "psutil~=7.1",
     "pydantic-settings~=2.10",
     "questionary~=2.1",
@@ -52,6 +52,10 @@ ui = [
 ]
 vllm = [
     "vllm>=0.8",
+    "speculators>=0.1.9",
+]
+sglang = [
+    "sglang[all]>=0.5.10",
     "speculators>=0.1.9",
 ]
 

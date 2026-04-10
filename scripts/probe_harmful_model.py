@@ -226,7 +226,7 @@ def judge_response(judge_model: str, question: str, response: str) -> str:
             "Authorization": "Bearer " + api_key,
             "Content-Type": "application/json",
             "HTTP-Referer": "https://github.com/wuwangzhang1216/abliterix",
-            "X-Title": "prometheus",
+            "X-Title": "abliterix",
         },
         method="POST",
     )

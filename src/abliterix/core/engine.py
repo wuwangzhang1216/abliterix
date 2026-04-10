@@ -5,6 +5,8 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 
 import json
+import os
+import sys
 from collections import defaultdict
 from contextlib import suppress
 from typing import Any, Type, cast
@@ -36,6 +38,10 @@ from ..settings import AbliterixConfig
 from ..types import ChatMessage, QuantMode, WeightNorm
 from ..util import chunk_batches, flush_memory, print
 
+# transformers < 5.0 uses torch_dtype=, >= 5.0 uses dtype= in from_pretrained.
+import transformers as _tf
+_dtype_kwarg = "dtype" if int(_tf.__version__.split(".")[0]) >= 5 else "torch_dtype"
+
 
 def resolve_model_class(
     model_id: str,
@@ -51,6 +57,64 @@ def resolve_model_class(
     if any("vision_config" in cfg for cfg in configs):
         return AutoModelForImageTextToText
     return AutoModelForCausalLM
+
+
+def _patch_mtp_layer_types(model_id: str, trust_remote_code: bool | None) -> None:
+    """Patch models whose ``layer_types`` includes MTP head layers.
+
+    Models like Step-3.5-Flash define ``layer_types`` with 48 entries (45
+    decoder + 3 MTP) but ``num_hidden_layers=45``.  Transformers >= 5.5
+    validates that ``len(layer_types) == num_hidden_layers``, causing a
+    ``ValueError``.
+
+    We patch the cached remote config module source file to truncate
+    ``layer_types`` before the parent ``__init__`` validator runs.
+    """
+    try:
+        cfgs = PretrainedConfig.get_config_dict(
+            model_id, trust_remote_code=trust_remote_code,
+        )
+        cfg_dict = cfgs[0] if isinstance(cfgs, tuple) else cfgs
+        layer_types = cfg_dict.get("layer_types")
+        n_hidden = cfg_dict.get("num_hidden_layers")
+        if not (layer_types and n_hidden and len(layer_types) > n_hidden):
+            return
+
+        # Find the cached configuration_*.py file for this model and patch it
+        # to truncate layer_types before super().__init__().
+        import importlib
+        from pathlib import Path
+
+        cache_dir = Path(
+            os.environ.get("HF_HOME", Path.home() / ".cache" / "huggingface")
+        ) / "modules" / "transformers_modules"
+
+        # Search for configuration files matching this model.
+        for config_py in cache_dir.rglob("configuration_*.py"):
+            if model_id.split("/")[-1].lower().replace("-", "_").replace(".", "_") not in str(config_py).lower().replace("-", "_").replace(".", "_"):
+                continue
+            text = config_py.read_text()
+            marker = "self.layer_types = layer_types"
+            patch = (
+                "# Truncate MTP head layers (transformers >= 5.5 validation fix)\n"
+                "        if layer_types is not None and len(layer_types) > num_hidden_layers:\n"
+                "            layer_types = layer_types[:num_hidden_layers]\n"
+                "        self.layer_types = layer_types"
+            )
+            if marker in text and "Truncate MTP" not in text:
+                text = text.replace(marker, patch)
+                config_py.write_text(text)
+                # Invalidate any cached import of this module.
+                for mod_name in list(sys.modules):
+                    if "configuration_step3p5" in mod_name:
+                        del sys.modules[mod_name]
+                print(
+                    f"  [dim]Patched {config_py.name}: "
+                    f"truncating {len(layer_types)} layer_types → {n_hidden}[/]"
+                )
+                return
+    except Exception:
+        pass
 
 
 def load_tokenizer(
@@ -107,7 +171,7 @@ class SteeringEngine:
 
     The engine owns the loaded model and exposes methods for text generation,
     hidden-state extraction, and log-probability measurement.  The actual
-    steering algorithm lives in :mod:`prometheus.core.steering`.
+    steering algorithm lives in :mod:`abliterix.core.steering`.
     """
 
     model: PreTrainedModel | PeftModel
@@ -130,6 +194,10 @@ class SteeringEngine:
 
         print()
         print(f"Loading model [bold]{model_id}[/]...")
+
+        # Patch MTP models whose layer_types length exceeds num_hidden_layers
+        # (e.g. Step-3.5-Flash: 48 layer_types vs 45 num_hidden_layers).
+        _patch_mtp_layer_types(model_id, config.model.trust_remote_code)
 
         self.tokenizer = load_tokenizer(
             model_id,
@@ -161,12 +229,38 @@ class SteeringEngine:
                 config.model.trust_remote_code
             )
 
+        # Auto-detect native FP8 models: if the model's config.json already
+        # contains quantization_config with quant_method="fp8", treat it as FP8
+        # even if the user didn't explicitly set quant_method in our config.
+        self._is_native_fp8 = False
+        try:
+            from transformers import AutoConfig as _AC
+            _auto_cfg = _AC.from_pretrained(model_id, trust_remote_code=True)
+            _qcfg = getattr(_auto_cfg, "quantization_config", None)
+            if _qcfg is None:
+                _text_cfg = getattr(_auto_cfg, "text_config", None)
+                if _text_cfg is not None:
+                    _qcfg = getattr(_text_cfg, "quantization_config", None)
+            if _qcfg is not None:
+                _qm = _qcfg if isinstance(_qcfg, dict) else getattr(_qcfg, "__dict__", {})
+                if _qm.get("quant_method") == "fp8":
+                    self._is_native_fp8 = True
+                    if config.model.quant_method != QuantMode.FP8:
+                        print(
+                            f"  [dim]Auto-detected native FP8 model "
+                            f"(quantization_config in config.json)[/]"
+                        )
+        except Exception:
+            pass
+
+        is_fp8 = config.model.quant_method == QuantMode.FP8 or self._is_native_fp8
+
         # Workaround: transformers FP8 quantizer accesses config.intermediate_size
         # as a fallback when moe_intermediate_size is absent. Some MoE model configs
         # (e.g. Qwen3.5 MoE) only define moe_intermediate_size, causing an
         # AttributeError during replace_with_fp8_linear. Patch the config class
         # to alias intermediate_size → moe_intermediate_size if needed.
-        if config.model.quant_method == QuantMode.FP8:
+        if is_fp8:
             self._patch_moe_config_for_fp8(model_id)
 
         for dtype in config.model.dtype_fallback_order:
@@ -184,7 +278,7 @@ class SteeringEngine:
 
                 self.model = resolve_model_class(model_id).from_pretrained(
                     model_id,
-                    dtype=dtype,
+                    **{_dtype_kwarg: dtype},
                     device_map=config.model.device_map,
                     max_memory=self.max_memory,
                     trust_remote_code=self.trusted_models.get(model_id),
@@ -195,15 +289,19 @@ class SteeringEngine:
                 if self.trusted_models.get(model_id) is None:
                     self.trusted_models[model_id] = True
 
-                # FP8 dequant MUST run before the smoke-test: the Triton
-                # finegrained FP8 kernels can crash with newer torch versions
-                # ("Parameter block_size has unsupported type list"), so we
-                # replace them with bf16 dequant before any forward pass.
-                if (
-                    config.model.quant_method == QuantMode.FP8
-                    and not config.model.skip_fp8_dequant
-                ):
-                    self._dequant_fp8_to_bf16()
+                # FP8 handling: decide whether to use native FP8 kernels or
+                # fall back to bf16 dequant.  Applies to both explicit
+                # quant_method="fp8" and auto-detected native FP8 models.
+                if is_fp8:
+                    skip = self._should_skip_fp8_dequant()
+                    if not skip:
+                        self._dequant_fp8_to_bf16()
+                    else:
+                        print(
+                            "  [dim]Using native FP8 kernels "
+                            "(skip_fp8_dequant or auto-detected H100+ "
+                            "with transformers >= 5.2)[/]"
+                        )
 
                 # Smoke-test: a single forward pass catches dtype-related
                 # runtime errors (inf/nan probability tensors, etc.).
@@ -223,7 +321,7 @@ class SteeringEngine:
                 print("[green]Ok[/] (quantized to 4-bit precision)")
             elif config.model.quant_method == QuantMode.BNB_8BIT:
                 print("[green]Ok[/] (quantized to 8-bit precision)")
-            elif config.model.quant_method == QuantMode.FP8:
+            elif is_fp8:
                 print("[green]Ok[/] (FP8 precision)")
             else:
                 print("[green]Ok[/]")
@@ -272,6 +370,41 @@ class SteeringEngine:
     # FP8 dequantization workaround
     # ------------------------------------------------------------------
 
+    def _should_skip_fp8_dequant(self) -> bool:
+        """Decide whether to skip the FP8→bf16 dequant workaround.
+
+        Returns True when native FP8 kernels are safe to use:
+        - Explicit ``skip_fp8_dequant=True`` in config, OR
+        - Auto-detect: H100+ (SM >= 90) AND transformers >= 5.2.0
+          (which fixed the Triton kernel div-by-zero in act_quant_kernel
+          and the MoE weight_scale_inv shape mismatch).
+
+        Returns False when dequant is needed for safety.
+        """
+        skip = self.config.model.skip_fp8_dequant
+        if skip is not None:
+            return skip
+
+        # Auto-detect: check GPU compute capability and transformers version.
+        try:
+            # SM >= 90 (H100/H200/B200)
+            if torch.cuda.is_available():
+                cc = torch.cuda.get_device_capability(0)
+                if cc[0] < 9:
+                    return False  # A100 or older — dequant needed
+            else:
+                return False
+
+            # transformers >= 5.2.0 has the FP8 kernel fixes
+            import transformers
+            tv = tuple(int(x) for x in transformers.__version__.split(".")[:2])
+            if tv >= (5, 2):
+                return True
+        except Exception:
+            pass
+
+        return False  # Default: safe fallback
+
     def _dequant_fp8_to_bf16(self):
         """Replace FP8 Linear forward paths with on-the-fly bf16 dequantization.
 
@@ -316,14 +449,11 @@ class SteeringEngine:
                         w_f = w.to(torch.bfloat16)
                         s_f = s.float()
                         # Expand block-wise scales to match weight shape.
-                        block_size = max(1, w.shape[-1] // s.shape[-1])
-                        s_exp = s_f.repeat_interleave(block_size, dim=-1)[
-                            :, : w.shape[-1]
-                        ]
-                        if s_exp.shape[0] < w.shape[0]:
-                            s_exp = s_exp.repeat_interleave(
-                                max(1, w.shape[0] // s_exp.shape[0]), dim=0
-                            )[: w.shape[0]]
+                        # Scale shape is (rows/block, cols/block) — expand both dims.
+                        block_r = max(1, w.shape[0] // s.shape[0])
+                        block_c = max(1, w.shape[1] // s.shape[1])
+                        s_exp = s_f.repeat_interleave(block_r, dim=0).repeat_interleave(block_c, dim=1)
+                        s_exp = s_exp[:w.shape[0], :w.shape[1]]
                         if is_inv:
                             w_bf16 = (w_f * s_exp).to(torch.bfloat16)
                         else:
@@ -404,7 +534,7 @@ class SteeringEngine:
         # PEFT inherits the base layer's dtype for LoRA A/B weights.  For FP8
         # models this produces Float8_e4m3fn parameters that crash F.linear
         # ("addmm_cuda not implemented for Float8_e4m3fn").  Cast to bf16.
-        if self.config.model.quant_method == QuantMode.FP8:
+        if self.config.model.quant_method == QuantMode.FP8 or self._is_native_fp8:
             _fp8 = {torch.float8_e4m3fn, torch.float8_e5m2}
             for name, param in self.model.named_parameters():
                 if "lora_" in name and param.dtype in _fp8:
@@ -475,8 +605,18 @@ class SteeringEngine:
                 llm_int8_enable_fp32_cpu_offload=True,
             )
         elif qm == QuantMode.FP8:
-            # Pre-quantized FP8 models carry their own quantization_config;
-            # transformers reads it from the model files automatically.
+            # Pre-quantized FP8 models carry their own quantization_config.
+            # If weight_block_size is specified, create a FineGrainedFP8Config
+            # to fix MoE weight_scale_inv shape mismatches.
+            block_size = self.config.model.fp8_weight_block_size
+            if block_size is not None:
+                try:
+                    from transformers import FineGrainedFP8Config
+                    return FineGrainedFP8Config(
+                        weight_block_size=block_size,
+                    )
+                except ImportError:
+                    pass  # Older transformers without FineGrainedFP8Config
             return None
         return None
 
@@ -486,16 +626,35 @@ class SteeringEngine:
 
     @property
     def transformer_layers(self) -> ModuleList:
-        """Return the ordered list of transformer decoder blocks."""
+        """Return the ordered list of transformer decoder blocks.
+
+        Models with Multi-Token Prediction heads (e.g. Step-3.5-Flash) may
+        have extra layers beyond ``num_hidden_layers``.  We truncate to the
+        config value when available to avoid steering MTP head layers.
+        """
         m = self.model
         if isinstance(m, PeftModel):
             m = m.base_model.model
 
         with suppress(Exception):
-            return m.model.language_model.layers
+            layers = m.model.language_model.layers
+            return self._truncate_to_hidden_layers(m, layers)
         with suppress(Exception):
-            return m.backbone.layers  # NemotronH
-        return m.model.layers
+            layers = m.backbone.layers  # NemotronH
+            return self._truncate_to_hidden_layers(m, layers)
+        layers = m.model.layers
+        return self._truncate_to_hidden_layers(m, layers)
+
+    @staticmethod
+    def _truncate_to_hidden_layers(model: Any, layers: ModuleList) -> ModuleList:
+        """Truncate layer list to ``num_hidden_layers`` if the model has MTP head layers."""
+        cfg = getattr(model, "config", None)
+        text_cfg = getattr(cfg, "text_config", cfg)
+        n = getattr(text_cfg, "num_hidden_layers", None)
+        if n is not None and len(layers) > n:
+            # Return a sliced ModuleList containing only the real decoder layers.
+            return ModuleList(list(layers)[:n])
+        return layers
 
     def steerable_modules(self, layer_index: int) -> dict[str, list[Module]]:
         """Discover modules within *layer_index* that can be steered.
@@ -514,7 +673,15 @@ class SteeringEngine:
                     f"Unexpected Tensor in {component} — expected nn.Module"
                 )
 
-        # Standard self-attention output projection.
+        # Self-attention projections — Q/K/V determine what information gets
+        # read from/written to the residual; targeting all four breaks through
+        # PLE repair by preventing the model from attending to refusal positions.
+        with suppress(Exception):
+            _register("attn.q_proj", layer.self_attn.q_proj)  # ty:ignore[possibly-missing-attribute]
+        with suppress(Exception):
+            _register("attn.k_proj", layer.self_attn.k_proj)  # ty:ignore[possibly-missing-attribute]
+        with suppress(Exception):
+            _register("attn.v_proj", layer.self_attn.v_proj)  # ty:ignore[possibly-missing-attribute]
         with suppress(Exception):
             _register("attn.o_proj", layer.self_attn.o_proj)  # ty:ignore[possibly-missing-attribute]
 
@@ -552,6 +719,11 @@ class SteeringEngine:
         with suppress(Exception):
             for expert in layer.moe.experts:  # ty:ignore[possibly-missing-attribute, not-iterable]
                 _register("mlp.down_proj", expert.output_linear)  # ty:ignore[possibly-missing-attribute]
+
+        # Step-3.5-Flash — shared expert (singular "share_expert", not "shared_expert").
+        # Registered as mlp.down_proj intentionally — same steering profile as per-expert modules.
+        with suppress(Exception):
+            _register("mlp.down_proj", layer.share_expert.down_proj)  # ty:ignore[possibly-missing-attribute]
 
         # LFM2 MoE — gated short convolution output projection.
         with suppress(Exception):
@@ -618,7 +790,7 @@ class SteeringEngine:
 
     def _locate_router(self, layer: Module) -> Module | None:
         """Find the MoE router/gate module that contains a 2-D weight tensor."""
-        for path in ["mlp.gate", "mlp.router", "mixer.gate", "block_sparse_moe.gate", "feed_forward.gate"]:
+        for path in ["mlp.gate", "mlp.router", "moe.gate", "mixer.gate", "block_sparse_moe.gate", "feed_forward.gate", "router.proj"]:
             obj: Any = layer
             for attr in path.split("."):
                 obj = getattr(obj, attr, None)
@@ -631,8 +803,17 @@ class SteeringEngine:
         return None
 
     def _locate_fused_weights(self, layer: Module) -> Parameter | None:
-        """Find the fused 3-D expert parameter [experts, hidden, intermediate]."""
-        for path in ["mlp.experts.down_proj", "mixer.experts.down_proj", "feed_forward.experts.down_proj"]:
+        """Find the fused 3-D expert parameter [experts, hidden, intermediate].
+
+        Handles both raw ``nn.Parameter`` (e.g. Qwen3 ``mlp.experts.down_proj``)
+        and ``MoELinear``-style modules whose ``.weight`` is the 3-D tensor
+        (e.g. Step-3.5-Flash ``moe.down_proj``).
+        """
+        for path in [
+            "mlp.experts.down_proj", "mixer.experts.down_proj",
+            "feed_forward.experts.down_proj", "moe.down_proj",
+            "experts.down_proj",
+        ]:
             obj: Any = layer
             for attr in path.split("."):
                 obj = getattr(obj, attr, None)
@@ -640,6 +821,12 @@ class SteeringEngine:
                     break
             if isinstance(obj, Parameter) and obj.dim() == 3:
                 return obj
+            # MoELinear-style: the module has a .weight attribute that is the
+            # fused 3-D tensor (Step-3.5-Flash packs 288 experts this way).
+            if isinstance(obj, Module):
+                w = getattr(obj, "weight", None)
+                if isinstance(w, (Parameter, Tensor)) and w.dim() == 3:
+                    return w if isinstance(w, Parameter) else None
         return None
 
     def has_expert_routing(self) -> bool:
@@ -762,6 +949,12 @@ class SteeringEngine:
             handle.remove()
         self._angular_hooks = []
 
+        # Restore direct weight modifications (orthogonal projection mode).
+        for weight_ref, orig in getattr(self, "_direct_weight_originals", {}).items():
+            weight_ref.data = orig.to(weight_ref.device)
+        if hasattr(self, "_direct_weight_originals"):
+            self._direct_weight_originals.clear()
+
         current_id = getattr(self.model.config, "name_or_path", None)
         if current_id == self.config.model.model_id and not self.needs_reload:
             for w in self._lora_b_weights:
@@ -793,14 +986,15 @@ class SteeringEngine:
 
         self.model = resolve_model_class(self.config.model.model_id).from_pretrained(
             self.config.model.model_id,
-            dtype=dtype,
+            **{_dtype_kwarg: dtype},
             device_map=self.config.model.device_map,
             max_memory=self.max_memory,
             trust_remote_code=self.trusted_models.get(self.config.model.model_id),
             **extra,
         )
-        if self.config.model.quant_method == QuantMode.FP8 and not self.config.model.skip_fp8_dequant:
-            self._dequant_fp8_to_bf16()
+        if self.config.model.quant_method == QuantMode.FP8 or self._is_native_fp8:
+            if not self._should_skip_fp8_dequant():
+                self._dequant_fp8_to_bf16()
         self._init_adapters()
         self._init_expert_routing()
         self.needs_reload = False
@@ -827,7 +1021,7 @@ class SteeringEngine:
             print("* Loading base model on CPU (this may take a while)...")
             base = resolve_model_class(self.config.model.model_id).from_pretrained(
                 self.config.model.model_id,
-                torch_dtype=self.model.dtype,
+                **{_dtype_kwarg: self.model.dtype},
                 device_map="cpu",
                 trust_remote_code=self.trusted_models.get(self.config.model.model_id),
             )

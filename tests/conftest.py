@@ -1,4 +1,4 @@
-"""Shared fixtures for Prometheus tests."""
+"""Shared fixtures for Abliterix tests."""
 
 import sys
 from types import SimpleNamespace
@@ -15,7 +15,7 @@ from abliterix.settings import AbliterixConfig  # noqa: E402
 
 
 @pytest.fixture
-def prometheus_config():
+def abliterix_config():
     """AbliterixConfig with dummy model ID (no TOML file needed)."""
     return AbliterixConfig()
 

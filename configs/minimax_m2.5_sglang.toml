@@ -1,0 +1,90 @@
+# MiniMax-M2.5 (MoE) — SGLang dual-engine config for 4x H100 80GB
+# 256 experts (8 routed), 62 layers, hidden=3072, expert_dim=1536
+# FP8: ~220GB weights -> TP=4 -> ~55GB/GPU, ~25GB headroom for KV cache + LoRA
+#
+# SGLang advantages over vLLM for this workload:
+#   - MoE LoRA with fused Triton kernels (vLLM lacks fused MoE LoRA)
+#   - LoRA weight loading overlap: ~78% TTFT reduction on adapter hot-swap
+#   - Efficient scheduler even without RadixAttention
+#
+# NOTE: RadixAttention (prefix caching) is incompatible with LoRA and is
+# automatically disabled.  Despite this, SGLang remains competitive.
+#
+# Requires: SGLang >= 0.5.10 (MoE LoRA support)
+#
+# Architecture: HF Phase 1 (hidden states + steering vectors) -> SGLang Phase 2
+# (tensor-parallel generation with LoRA hot-swap).
+
+[model]
+model_id = "MiniMaxAI/MiniMax-M2.5"
+dtype_fallback_order = ["auto"]
+quant_method = "fp8"
+attn_implementation = "flash_attention_2"
+use_torch_compile = false
+device_map = "auto"
+trust_remote_code = true
+# Phase 1 (HF): spread across 4x H100 80GB
+max_memory = {0 = "76GiB", 1 = "76GiB", 2 = "76GiB", 3 = "76GiB"}
+# Phase 2 (SGLang): tensor parallelism + RadixAttention
+backend = "sglang"
+tensor_parallel_size = 4
+gpu_memory_utilization = 0.93
+enable_chunked_prefill = true
+enforce_eager = false
+kv_cache_dtype = "fp8_e4m3"
+
+[inference]
+batch_size = 0
+max_batch_size = 16
+max_gen_tokens = 50
+
+[steering]
+vector_method = "mean"
+decay_kernel = "linear"
+orthogonal_projection = true
+weight_normalization = "none"
+strength_range = [1.0, 10.0]
+
+[optimization]
+num_trials = 50
+num_warmup_trials = 10
+checkpoint_dir = "checkpoints_minimax_m25_sglang"
+
+[kl]
+scale = 1.0
+token_count = 3
+target = 0.01
+prune_threshold = 5.0
+
+[detection]
+llm_judge = true
+llm_judge_model = "google/gemini-3.1-flash-lite-preview"
+llm_judge_batch_size = 10
+llm_judge_concurrency = 10
+
+[display]
+print_responses = false
+print_residual_geometry = false
+plot_residuals = false
+
+non_interactive = true
+
+[benign_prompts]
+dataset = "datasets/good_500"
+split = "train[:400]"
+column = "prompt"
+
+[target_prompts]
+dataset = "datasets/harmful_500"
+split = "train[:400]"
+column = "prompt"
+
+[benign_eval_prompts]
+dataset = "datasets/good_500"
+split = "train[400:]"
+column = "prompt"
+
+[target_eval_prompts]
+dataset = "datasets/harmful_500"
+split = "train[400:]"
+column = "prompt"

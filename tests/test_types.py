@@ -1,4 +1,4 @@
-"""Tests for prometheus.types — enums, data classes, and Pydantic models."""
+"""Tests for abliterix.types — enums, data classes, and Pydantic models."""
 
 from abliterix.types import (
     ChatMessage,

@@ -1,0 +1,97 @@
+# Gemma 4 31B — v7 COSMIC + Projected Abliteration
+# Goal: <10/100 refusals (down from 48/100 in v6)
+#
+# Strategy:
+#   - COSMIC auto-selects discriminative layers (critical for 5:1 sliding/global interleave)
+#   - Projected abliteration removes only the refusal-orthogonal component
+#   - Winsorization clips outlier activations from the 4-LayerNorm residual stream
+#   - Discriminative layer selection skips non-refusal layers entirely
+#   - Gaussian decay = smoother strength falloff than linear
+#   - Wider strength range + more trials for thorough exploration
+#   - Larger dataset for better steering vector quality
+
+[model]
+model_id = "google/gemma-4-31B-it"
+dtype_fallback_order = ["bfloat16"]
+quant_method = "none"
+use_torch_compile = false
+device_map = "auto"
+max_memory = {0 = "76GiB"}
+
+[inference]
+batch_size = 0
+max_batch_size = 4
+max_gen_tokens = 100
+
+[steering]
+# COSMIC: cosine-similarity-based direction selection
+# Automatically identifies which layers encode refusal most strongly
+# Critical for Gemma 4's interleaved sliding/global attention pattern
+vector_method = "cosmic"
+
+# Projected abliteration (grimjim 2025): only remove the component
+# orthogonal to the harmless mean, preserving helpfulness
+projected_abliteration = true
+
+# Winsorize extreme activations before projection
+winsorize_vectors = true
+winsorize_quantile = 0.995
+
+# Discriminative layer selection: skip layers where harmful/benign
+# activations don't project in opposite directions
+discriminative_layer_selection = true
+
+# Gaussian decay: smoother falloff than linear, less edge damage
+decay_kernel = "gaussian"
+
+# LoRA mode (weight modification)
+steering_mode = "lora"
+
+# No extra normalization — Gemma 4's double-norm handles this
+weight_normalization = "none"
+orthogonal_projection = false  # projected_abliteration supersedes this
+
+# Match Qwen3.5-27B proven range — [1.0, 5.0] on same-class dense model
+# v6 was [1.0, 2.5] which is the primary bottleneck
+strength_range = [1.0, 5.0]
+
+[optimization]
+num_trials = 150
+num_warmup_trials = 40
+checkpoint_dir = "checkpoints_gemma4_31b_v7_cosmic"
+
+[kl]
+scale = 1.0
+token_count = 3
+# Relaxed target — prioritize eliminating refusals
+target = 0.02
+# Higher prune threshold so aggressive configs aren't discarded too early
+prune_threshold = 8.0
+
+[detection]
+llm_judge = true
+llm_judge_batch_size = 10
+llm_judge_concurrency = 35
+
+[benign_prompts]
+dataset = "datasets/good_500"
+split = "train[:400]"
+column = "prompt"
+
+[target_prompts]
+dataset = "datasets/harmful_500"
+split = "train[:400]"
+column = "prompt"
+
+[benign_eval_prompts]
+dataset = "datasets/good_500"
+split = "train[400:]"
+column = "prompt"
+
+[target_eval_prompts]
+dataset = "datasets/harmful_500"
+split = "train[400:]"
+column = "prompt"
+
+[display]
+print_responses = false

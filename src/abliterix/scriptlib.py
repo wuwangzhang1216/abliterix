@@ -4,10 +4,10 @@
 #
 # SPDX-License-Identifier: AGPL-3.0-or-later
 
-"""Shared utilities for Prometheus scripts.
+"""Shared utilities for Abliterix scripts.
 
 setup_io() must be called before importing any library that captures
-stdout/stderr (e.g. Rich, which is imported by prometheus.utils).
+stdout/stderr (e.g. Rich, which is imported by abliterix.utils).
 All other functions use lazy imports so that importing this module
 does not trigger heavy library loading.
 """
@@ -17,7 +17,7 @@ import os
 import sys
 from pathlib import Path
 
-# Project root: src/prometheus/scriptlib.py -> src/prometheus -> src -> project root
+# Project root: src/abliterix/scriptlib.py -> src/abliterix -> src -> project root
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 
 

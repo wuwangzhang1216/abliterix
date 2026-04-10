@@ -7,6 +7,8 @@
 model_id = "Qwen/Qwen3.5-397B-A17B-FP8"
 dtype_fallback_order = ["auto"]
 quant_method = "fp8"
+# Fix Qwen3.5 MoE weight_scale_inv 1D/2D shape mismatch (transformers #42915)
+fp8_weight_block_size = [128, 128]
 use_torch_compile = false
 device_map = "auto"
 trust_remote_code = true
@@ -15,8 +17,8 @@ max_memory = {0 = "76GiB", 1 = "76GiB", 2 = "76GiB", 3 = "76GiB", 4 = "76GiB", 5
 
 [inference]
 batch_size = 0
-# 397B activations are ~3× the 122B footprint at the same batch size
-max_batch_size = 2
+# MoE: only 17B active params per token — can handle batch_size=4 on 6× H100
+max_batch_size = 4
 max_gen_tokens = 50
 
 [steering]

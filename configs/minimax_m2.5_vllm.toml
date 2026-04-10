@@ -14,6 +14,9 @@
 model_id = "MiniMaxAI/MiniMax-M2.5"
 dtype_fallback_order = ["auto"]
 quant_method = "fp8"
+# MiniMax requires transformers 4.57.x (custom code), which predates the
+# FP8 kernel fixes in 5.2.  On H100 the native FP8 kernels work fine with
+# 4.57 — skip the slow bf16 dequant workaround.
 skip_fp8_dequant = true
 attn_implementation = "flash_attention_2"
 use_torch_compile = false
@@ -24,11 +27,21 @@ max_memory = {0 = "76GiB", 1 = "76GiB", 2 = "76GiB", 3 = "76GiB"}
 # Phase 2 (vLLM): tensor parallelism across all 4 GPUs
 backend = "vllm"
 tensor_parallel_size = 4
-gpu_memory_utilization = 0.92
+gpu_memory_utilization = 0.93
+# EP for MoE expert layers — distributes experts across GPUs
+enable_expert_parallel = true
+# Chunked prefill overlaps prefill/decode for better GPU utilization
+enable_chunked_prefill = true
+# CUDA graphs for ~15% throughput boost (stable with vLLM >= 0.8)
+enforce_eager = false
+# FP8 KV cache: 2x KV capacity on H100 with negligible quality loss
+kv_cache_dtype = "fp8_e4m3"
 
 [inference]
 batch_size = 0
-max_batch_size = 8
+# MoE active params = 10B — much smaller than total 229B. GPU can handle
+# larger batches for continuous batching throughput.
+max_batch_size = 16
 max_gen_tokens = 50
 
 [steering]
@@ -64,21 +77,21 @@ plot_residuals = false
 non_interactive = true
 
 [benign_prompts]
-dataset = "datasets/good_500"
+dataset = "datasets/good_1000"
 split = "train[:400]"
 column = "prompt"
 
 [target_prompts]
-dataset = "datasets/harmful_500"
+dataset = "datasets/harmful_1000"
 split = "train[:400]"
 column = "prompt"
 
 [benign_eval_prompts]
-dataset = "datasets/good_500"
-split = "train[400:]"
+dataset = "datasets/good_1000"
+split = "train[400:500]"
 column = "prompt"
 
 [target_eval_prompts]
-dataset = "datasets/harmful_500"
-split = "train[400:]"
+dataset = "datasets/harmful_1000"
+split = "train[400:500]"
 column = "prompt"

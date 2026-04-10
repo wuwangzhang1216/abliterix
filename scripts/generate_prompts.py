@@ -4,7 +4,7 @@
 #
 # SPDX-License-Identifier: AGPL-3.0-or-later
 
-"""Generate prompt datasets for Prometheus abliteration testing.
+"""Generate prompt datasets for Abliterix abliteration testing.
 
 Uses OpenRouter API with Gemini to generate good (benign) and harmful prompt
 datasets with structured JSON output. Each API call generates exactly one prompt.
@@ -578,7 +578,7 @@ async def main_async(args: argparse.Namespace) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Generate prompt datasets for Prometheus"
+        description="Generate prompt datasets for Abliterix"
     )
     parser.add_argument(
         "--type",

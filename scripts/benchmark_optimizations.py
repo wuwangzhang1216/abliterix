@@ -4,7 +4,7 @@
 #
 # SPDX-License-Identifier: AGPL-3.0-or-later
 
-"""Diagnostic experiments for proposed Prometheus performance optimizations.
+"""Diagnostic experiments for proposed Abliterix performance optimizations.
 
 Runs 4 experiments to validate optimization hypotheses before implementation:
   1. output_scores=True overhead (VRAM + speed)
@@ -491,7 +491,7 @@ def experiment_abliteration_breakdown(engine, refusal_directions, study, n_repea
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Diagnostic experiments for Prometheus optimizations"
+        description="Diagnostic experiments for Abliterix optimizations"
     )
     parser.add_argument(
         "--model",
@@ -546,7 +546,7 @@ def main():
         return
 
     # Load config.
-    os.environ.setdefault("PM_CONFIG", "prometheus.toml")
+    os.environ.setdefault("PM_CONFIG", "abliterix.toml")
     sys.argv = ["benchmark", "--model.model-id", args.model]
     config = AbliterixConfig()
 

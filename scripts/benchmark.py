@@ -4,7 +4,7 @@
 #
 # SPDX-License-Identifier: AGPL-3.0-or-later
 
-"""A/B speed comparison benchmark for Prometheus inference optimizations.
+"""A/B speed comparison benchmark for Abliterix inference optimizations.
 
 Runs N trials with BOTH the old (separate-pass) and new (combined-pass) evaluation
 methods, interleaved in the same process.
@@ -247,7 +247,7 @@ def print_comparison(results):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="A/B speed benchmark for Prometheus")
+    parser = argparse.ArgumentParser(description="A/B speed benchmark for Abliterix")
     parser.add_argument(
         "--model", default="Qwen/Qwen3.5-0.8B", help="Hugging Face model ID"
     )
@@ -264,7 +264,7 @@ def main():
 
     torch.set_grad_enabled(False)
 
-    os.environ.setdefault("PM_CONFIG", "prometheus.toml")
+    os.environ.setdefault("PM_CONFIG", "abliterix.toml")
     sys.argv = ["benchmark", "--model.model-id", args.model]
     config = AbliterixConfig()
 

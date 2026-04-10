@@ -4,7 +4,7 @@
 #
 # SPDX-License-Identifier: AGPL-3.0-or-later
 
-"""Wrapper to run Prometheus on Windows without GBK encoding errors.
+"""Wrapper to run Abliterix on Windows without GBK encoding errors.
 
 Rich's Win32 console writer bypasses PYTHONIOENCODING and uses the native
 Windows console code page (GBK/cp936), causing UnicodeEncodeError on Unicode
@@ -19,7 +19,7 @@ from abliterix.scriptlib import setup_io
 
 setup_io()
 
-# Now import and run prometheus — Rich will see non-console file handles
+# Now import and run abliterix — Rich will see non-console file handles
 sys.argv = ["abliterix"] + sys.argv[1:]
 from abliterix.cli import main  # noqa: E402
 

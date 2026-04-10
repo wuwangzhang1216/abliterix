@@ -6,7 +6,7 @@
 
 import os
 import sys
-from typing import Dict
+from typing import Any, Dict
 
 from pydantic import BaseModel, Field
 from pydantic_settings import (
@@ -91,12 +91,23 @@ class ModelConfig(BaseModel):
         ),
     )
 
-    skip_fp8_dequant: bool = Field(
-        default=False,
+    skip_fp8_dequant: bool | None = Field(
+        default=None,
         description=(
-            "Skip the FP8→bf16 dequantisation workaround.  Enable this when running "
-            "on GPUs with reliable native FP8 GEMM (e.g. H100/H200/RTX PRO 6000 with "
-            "a compatible transformers version)."
+            "Skip the FP8→bf16 dequantisation workaround.  "
+            "None (default) = auto-detect: skip dequant on H100+ with transformers >= 5.2.  "
+            "True = always skip (native FP8 GEMM).  "
+            "False = always dequant to bf16 (safe fallback)."
+        ),
+    )
+
+    fp8_weight_block_size: list[int] | None = Field(
+        default=None,
+        description=(
+            "Block size for FP8 fine-grained quantization, e.g. [128, 128].  "
+            "Required for some MoE models (Qwen3.5 MoE) to fix weight_scale_inv "
+            "shape mismatches with device_map='auto'.  "
+            "None = auto-detect from model config."
         ),
     )
 
@@ -104,9 +115,11 @@ class ModelConfig(BaseModel):
         default="hf",
         description=(
             "Inference backend: 'hf' for HuggingFace Transformers (pipeline parallelism), "
-            "'vllm' for vLLM (tensor parallelism).  vLLM provides dramatically higher "
-            "throughput on multi-GPU setups by parallelising computation across GPUs "
-            "instead of sharding layers sequentially."
+            "'vllm' for vLLM (tensor parallelism), "
+            "'sglang' for SGLang (RadixAttention + tensor parallelism).  "
+            "SGLang is ~29%% faster than vLLM on prefix-heavy workloads.  "
+            "Both vLLM and SGLang provide dramatically higher throughput on multi-GPU "
+            "setups by parallelising computation across GPUs."
         ),
     )
 
@@ -122,6 +135,52 @@ class ModelConfig(BaseModel):
         default=0.92,
         description=(
             "Fraction of GPU memory vLLM may use (0.0-1.0).  Ignored when backend='hf'."
+        ),
+    )
+
+    enable_expert_parallel: bool = Field(
+        default=True,
+        description=(
+            "Enable expert parallelism (EP) for MoE models in vLLM.  "
+            "EP distributes experts across GPUs rather than replicating them.  "
+            "Best for models with >3% expert activation density (DeepSeek, Qwen MoE)."
+        ),
+    )
+
+    enable_chunked_prefill: bool = Field(
+        default=True,
+        description=(
+            "Enable chunked prefill to overlap prefill and decode phases.  "
+            "For SGLang: controls chunked_prefill_size (8192 when True).  "
+            "For vLLM V1 (>= 0.8): always on, this setting is ignored."
+        ),
+    )
+
+    kv_cache_dtype: str | None = Field(
+        default=None,
+        description=(
+            "KV cache data type for vLLM.  "
+            "None = auto (fp8_e4m3 for FP8 models on H100+, otherwise default).  "
+            "'fp8_e4m3' halves KV cache memory with negligible quality loss.  "
+            "'auto' uses the model's native dtype."
+        ),
+    )
+
+    enforce_eager: bool = Field(
+        default=False,
+        description=(
+            "Force eager mode in vLLM (disable CUDA graphs).  "
+            "Safer for debugging but slower.  Default False enables CUDA graphs "
+            "for ~10-20%% higher throughput."
+        ),
+    )
+
+    hf_overrides: Dict[str, Any] | None = Field(
+        default=None,
+        description=(
+            "Model config overrides passed to vLLM/SGLang via hf_overrides.  "
+            "Used to patch model config values at load time, e.g. "
+            '{num_nextn_predict_layers = 1} to downgrade MTP-3 to MTP-1.'
         ),
     )
 
@@ -214,7 +273,9 @@ class SteeringConfig(BaseModel):
             '"angular" rotates activations at inference time via hooks, '
             '"adaptive_angular" rotates only aligned activations (reduces interference), '
             '"spherical" rotates along geodesics on the activation hypersphere, '
-            '"vector_field" uses learned context-dependent steering directions.'
+            '"vector_field" uses learned context-dependent steering directions, '
+            '"direct" modifies base weights in-place via orthogonal projection '
+            '(required for models with double-norm like Gemma 4 where LoRA is ineffective).'
         ),
     )
 

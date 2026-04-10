@@ -57,7 +57,7 @@ parser.add_argument(
 parser.add_argument(
     "--config",
     default=None,
-    help="Config file path (uses default prometheus.toml if not set)",
+    help="Config file path (uses default abliterix.toml if not set)",
 )
 parser.add_argument(
     "--batch-size", type=int, default=4, help="Batch size for inference (default: 4)"
@@ -208,7 +208,7 @@ card.data.base_model = args.model
 
 card.text = f"""# {model_name}-abliterated
 
-Unrestricted version of [{args.model}](https://huggingface.co/{args.model}), created using [Prometheus](https://github.com/wuwangzhang1216/abliterix).
+Unrestricted version of [{args.model}](https://huggingface.co/{args.model}), created using [Abliterix](https://github.com/wuwangzhang1216/abliterix).
 
 ## Performance
 

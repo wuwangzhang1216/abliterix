@@ -1,4 +1,4 @@
-"""Tests for prometheus.scriptlib — trial parameter extraction.
+"""Tests for abliterix.scriptlib — trial parameter extraction.
 
 Uses mock trial objects (no checkpoint files needed).
 """

@@ -1,4 +1,4 @@
-"""Tests for prometheus.settings — configuration loading and defaults."""
+"""Tests for abliterix.settings — configuration loading and defaults."""
 
 import sys
 
@@ -89,12 +89,12 @@ def test_expert_config_defaults():
 # ---------------------------------------------------------------------------
 
 
-def test_prometheus_config_loads():
+def test_abliterix_config_loads():
     config = AbliterixConfig()
     assert config.model.model_id == "test/model-001"
 
 
-def test_prometheus_config_nested_types():
+def test_abliterix_config_nested_types():
     config = AbliterixConfig()
     assert isinstance(config.steering, SteeringConfig)
     assert isinstance(config.kl, KLConfig)
@@ -102,7 +102,7 @@ def test_prometheus_config_nested_types():
     assert isinstance(config.optimization, OptimizationConfig)
 
 
-def test_prometheus_config_data_sources():
+def test_abliterix_config_data_sources():
     config = AbliterixConfig()
     assert config.benign_prompts.dataset
     assert config.target_prompts.dataset

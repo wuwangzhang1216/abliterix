@@ -36,14 +36,16 @@ with __import__("contextlib").suppress(AttributeError):
 def _dequantize_fp8_blockwise(
     weight: Tensor,
     weight_scale: Tensor,
-    block_size: int = 128,
 ) -> Tensor:
     """Block-wise FP8 dequantization: W_real = weight_fp8 * scale_per_block."""
     out_f, in_f = weight.shape
     w = weight.to(torch.float32)
-    scale = weight_scale.repeat_interleave(block_size, dim=0)[:out_f]
-    scale = scale.repeat_interleave(block_size, dim=1)[:, :in_f]
-    return w * scale
+    # Infer block sizes from the ratio of weight/scale dimensions
+    # (handles non-square blocks and arbitrary weight shapes).
+    block_r = max(1, out_f // weight_scale.shape[0])
+    block_c = max(1, in_f // weight_scale.shape[1])
+    scale = weight_scale.float().repeat_interleave(block_r, dim=0).repeat_interleave(block_c, dim=1)
+    return w * scale[:out_f, :in_f]
 
 
 def _detect_discriminative_layers(
@@ -140,7 +142,7 @@ def _make_angular_hook(
         h_new = new_proj_on_d + new_residual
 
         if adaptive:
-            mask = (proj_scalar > 0).float()
+            mask = (proj_scalar > 0).to(h_new.dtype)
             h_new = mask * h_new + (1 - mask) * h
 
         if isinstance(output, tuple):
@@ -212,6 +214,30 @@ def apply_steering(
             p=2,
             dim=0,
         )
+
+    # --- Direct weight editing (orthogonal projection, no LoRA) -----------
+    if steering_mode == SteeringMode.DIRECT:
+        _apply_direct_steering(
+            engine,
+            steering_vectors,
+            global_vector,
+            profiles,
+            config,
+            discriminative_layers,
+        )
+        # Expert-Granular Abliteration: project refusal direction from ALL
+        # expert down_proj slices, not just top-N safety experts.  This is
+        # critical for MoE models where refusal signal is distributed across
+        # all experts (TrevorS EGA method: 3/100 vs 29/100 without).
+        if engine.has_expert_routing():
+            _apply_ega_steering(
+                engine, steering_vectors, global_vector, profiles, config,
+                discriminative_layers,
+            )
+        # Legacy top-N router suppression (complementary to EGA).
+        if safety_experts and routing_config:
+            _apply_moe_steering(engine, steering_vectors, global_vector, safety_experts, routing_config)
+        return
 
     # --- Angular / Adaptive Angular steering (hook-based) -----------------
     if steering_mode in (SteeringMode.ANGULAR, SteeringMode.ADAPTIVE_ANGULAR):
@@ -401,6 +427,209 @@ def apply_steering(
             engine, steering_vectors, global_vector, safety_experts, routing_config,
             sv_by_device=sv_by_device, gv_by_device=gv_by_device,
         )
+
+
+# ---------------------------------------------------------------------------
+# Direct weight editing (orthogonal projection, bypasses LoRA)
+# ---------------------------------------------------------------------------
+
+
+def _apply_direct_steering(
+    engine,
+    steering_vectors: Tensor,
+    global_vector: Tensor | None,
+    profiles: dict[str, SteeringProfile],
+    config: AbliterixConfig,
+    discriminative_layers: set[int] | None,
+):
+    """Modify base weights in-place via norm-preserving orthogonal projection.
+
+    Required for architectures like Gemma 4 where double-norm (4 RMSNorm per
+    layer) and Per-Layer Embeddings (PLE) suppress LoRA perturbations.
+
+    For each steerable module, projects out the refusal direction from the
+    weight matrix while preserving original row norms:
+
+        d = steering_vector (unit-normalised)
+        W_new = W - strength * (W @ d) ⊗ d
+        W_new = W_new * (||W_row|| / ||W_new_row||)   # norm preservation
+
+    Weight originals are cached on the engine for restore_baseline().
+    """
+    kernel = config.steering.decay_kernel
+
+    # Cache originals for restore_baseline.
+    if not hasattr(engine, "_direct_weight_originals"):
+        engine._direct_weight_originals = {}
+
+    for layer_idx in range(len(engine.transformer_layers)):
+        if discriminative_layers is not None and layer_idx not in discriminative_layers:
+            continue
+
+        for component, modules in engine.steerable_modules(layer_idx).items():
+            sp = profiles[component]
+
+            distance = cast(float, abs(layer_idx - sp.max_weight_position))
+            if distance > sp.min_weight_distance:
+                continue
+
+            # Compute interpolated strength using the configured decay kernel.
+            t = distance / sp.min_weight_distance
+            if kernel == DecayKernel.GAUSSIAN:
+                strength = sp.min_weight + (sp.max_weight - sp.min_weight) * math.exp(
+                    -2.0 * t * t
+                )
+            elif kernel == DecayKernel.COSINE:
+                strength = sp.min_weight + (sp.max_weight - sp.min_weight) * (
+                    0.5 * (1.0 + math.cos(math.pi * t))
+                )
+            else:  # LINEAR
+                strength = sp.max_weight + t * (sp.min_weight - sp.max_weight)
+
+            for mod in modules:
+                # Navigate to the base weight — through PEFT wrapper if present.
+                base_mod = mod
+                if hasattr(mod, "base_layer"):
+                    base_mod = mod.base_layer
+
+                weight = base_mod.weight
+
+                # Cache the original weight for later restoration.
+                # Key by the weight tensor itself for O(1) restore.
+                if weight not in engine._direct_weight_originals:
+                    engine._direct_weight_originals[weight] = weight.data.clone()
+
+                device = weight.device
+                if global_vector is None:
+                    v = steering_vectors[layer_idx + 1].to(device)
+                else:
+                    v = global_vector.to(device)
+
+                # Use float32 for projection math to preserve precision
+                # (bf16 loses signal in 2816-dim inner products).
+                W = weight.data.to(torch.float32)
+                vf = v.to(torch.float32)
+
+                # Orthogonal projection: remove the refusal direction from W.
+                # W has shape (out_features, in_features).
+                # v has shape (hidden_dim,) which may match either dimension.
+                out_f, in_f = W.shape
+
+                if vf.shape[0] == out_f:
+                    proj = vf @ W
+                    W_new = W - strength * vf.unsqueeze(1) * proj.unsqueeze(0)
+                elif vf.shape[0] == in_f:
+                    proj = W @ vf
+                    W_new = W - strength * proj.unsqueeze(1) * vf.unsqueeze(0)
+                else:
+                    # Dimension mismatch — skip this module.
+                    continue
+
+                # Norm-preserving: restore original row magnitudes.
+                # Critical for double-norm architectures (Gemma 4) where
+                # row norm changes cascade through RMSNorm layers.
+                if config.steering.weight_normalization != WeightNorm.NONE:
+                    orig_norms = torch.linalg.vector_norm(W, dim=1, keepdim=True)
+                    new_norms = torch.linalg.vector_norm(W_new, dim=1, keepdim=True).clamp(min=1e-8)
+                    W_new = W_new * (orig_norms / new_norms)
+
+                weight.data = W_new.to(weight.dtype)
+
+
+# ---------------------------------------------------------------------------
+# Expert-Granular Abliteration (EGA)
+# ---------------------------------------------------------------------------
+
+
+def _apply_ega_steering(
+    engine,
+    steering_vectors: Tensor,
+    global_vector: Tensor | None,
+    profiles: dict[str, SteeringProfile],
+    config: AbliterixConfig,
+    discriminative_layers: set[int] | None,
+):
+    """Project out the refusal direction from ALL expert down_proj slices.
+
+    Unlike ``_apply_moe_steering`` which only targets top-N safety experts
+    identified by router profiling, EGA applies norm-preserving orthogonal
+    projection to every expert in every MoE layer.  This is necessary because
+    refusal signal is distributed across all experts, not concentrated in a
+    few (TrevorS EGA method: 3/100 refusals vs 29/100 without EGA on Gemma 4
+    26B-A4B).
+
+    The strength for each layer is derived from the ``mlp.down_proj`` profile
+    (same component name used for both dense MLP and expert projections).
+    """
+    kernel = config.steering.decay_kernel
+    norm_preserve = config.steering.weight_normalization != WeightNorm.NONE
+
+    if not hasattr(engine, "_direct_weight_originals"):
+        engine._direct_weight_originals = {}
+
+    sp = profiles.get("mlp.down_proj")
+    if sp is None:
+        return
+
+    for layer_idx in range(len(engine.transformer_layers)):
+        if discriminative_layers is not None and layer_idx not in discriminative_layers:
+            continue
+
+        layer = engine.transformer_layers[layer_idx]
+        fused = engine._locate_fused_weights(layer)
+        if fused is None:
+            continue
+
+        # Compute layer-specific strength from the mlp.down_proj profile.
+        distance = cast(float, abs(layer_idx - sp.max_weight_position))
+        if distance > sp.min_weight_distance:
+            continue
+
+        t = distance / sp.min_weight_distance
+        if kernel == DecayKernel.GAUSSIAN:
+            strength = sp.min_weight + (sp.max_weight - sp.min_weight) * math.exp(
+                -2.0 * t * t
+            )
+        elif kernel == DecayKernel.COSINE:
+            strength = sp.min_weight + (sp.max_weight - sp.min_weight) * (
+                0.5 * (1.0 + math.cos(math.pi * t))
+            )
+        else:
+            strength = sp.max_weight + t * (sp.min_weight - sp.max_weight)
+
+        # Pick the steering vector for this layer.
+        device = fused.device
+        if global_vector is None:
+            v = steering_vectors[layer_idx + 1].to(device)
+        else:
+            v = global_vector.to(device)
+
+        # Cache original for restore_baseline.
+        if fused not in engine._direct_weight_originals:
+            engine._direct_weight_originals[fused] = fused.data.clone()
+
+        n_experts = fused.shape[0]
+        vf = v.to(torch.float32)
+
+        for eid in range(n_experts):
+            W = fused.data[eid].to(torch.float32)
+            out_f, in_f = W.shape
+
+            if vf.shape[0] == out_f:
+                proj = vf @ W
+                W_new = W - strength * vf.unsqueeze(1) * proj.unsqueeze(0)
+            elif vf.shape[0] == in_f:
+                proj = W @ vf
+                W_new = W - strength * proj.unsqueeze(1) * vf.unsqueeze(0)
+            else:
+                continue
+
+            if norm_preserve:
+                orig_norms = torch.linalg.vector_norm(W, dim=1, keepdim=True)
+                new_norms = torch.linalg.vector_norm(W_new, dim=1, keepdim=True).clamp(min=1e-8)
+                W_new = W_new * (orig_norms / new_norms)
+
+            fused.data[eid] = W_new.to(fused.dtype)
 
 
 # ---------------------------------------------------------------------------
@@ -782,9 +1011,15 @@ def _apply_moe_steering(
                 for attr in ("weight_scale", "scale"):
                     fused_scale = getattr(fused, attr, None)
                     if fused_scale is None:
-                        # Try the parent module (mlp.experts).
-                        with __import__("contextlib").suppress(Exception):
-                            fused_scale = getattr(layer.mlp.experts, attr, None)
+                        # Try parent modules: mlp.experts (Qwen3), moe.down_proj (Step-3.5).
+                        for parent_path in ("mlp.experts", "moe.down_proj", "experts"):
+                            with __import__("contextlib").suppress(Exception):
+                                parent = layer
+                                for part in parent_path.split("."):
+                                    parent = getattr(parent, part)
+                                fused_scale = getattr(parent, attr, None)
+                            if fused_scale is not None:
+                                break
                     if fused_scale is not None:
                         break
             for eid, _ in top:

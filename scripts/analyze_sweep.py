@@ -4,7 +4,7 @@
 #
 # SPDX-License-Identifier: AGPL-3.0-or-later
 
-"""Analyze and visualize results from Prometheus abliteration experiments.
+"""Analyze and visualize results from Abliterix abliteration experiments.
 
 Reads results_summary.json produced by run_experiment.py and generates:
 1. Summary table comparing all variants
@@ -293,7 +293,7 @@ def compute_hypervolume(results: dict) -> dict:
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Analyze Prometheus experiment results"
+        description="Analyze Abliterix experiment results"
     )
     parser.add_argument(
         "--input",

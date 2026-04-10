@@ -100,8 +100,8 @@ def generate_model_card(
 
     return f"""# This is a decensored version of {
         model_link
-    }, made using [Prometheus](https://github.com/wuwangzhang1216/abliterix) v{
-        version("prometheus-llm")
+    }, made using [Abliterix](https://github.com/wuwangzhang1216/abliterix) v{
+        version("abliterix")
     }
 
 ## Steering parameters

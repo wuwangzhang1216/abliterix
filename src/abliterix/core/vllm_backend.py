@@ -82,22 +82,65 @@ class VLLMGenerator:
             max_lora_rank=_VLLM_MIN_RANK,
             max_loras=1,
             max_cpu_loras=2,
-            enforce_eager=True,  # safest for per-trial LoRA hot-swap
-            enable_expert_parallel=True,  # EP for MoE: better than TP for expert layers
+            enforce_eager=config.model.enforce_eager,
+            enable_expert_parallel=config.model.enable_expert_parallel,
+            # NOTE: chunked_prefill is always ON in vLLM V1 (>= 0.8) and
+            # cannot be disabled.  We don't pass enable_chunked_prefill.
         )
 
+        # Model config overrides (e.g. MTP-3 → MTP-1 for Step-3.5-Flash).
+        if config.model.hf_overrides:
+            kwargs["hf_overrides"] = config.model.hf_overrides
+
         # FP8 models: let vLLM handle quantisation natively.
-        if config.model.quant_method and config.model.quant_method.value == "fp8":
+        # For native FP8 models (quantization_config in config.json), vLLM
+        # auto-detects — we only need to set quantization="fp8" explicitly
+        # when the user requests on-the-fly FP8 quantization of a BF16 model.
+        is_fp8 = config.model.quant_method and config.model.quant_method.value == "fp8"
+        if is_fp8:
             kwargs["quantization"] = "fp8"
-            # FP8 KV cache halves KV memory with negligible quality loss on H100.
-            kwargs["kv_cache_dtype"] = "fp8_e4m3"
+        # Note: native FP8 models (MiniMax-M2.5, Qwen3.5-*-FP8) ship with
+        # quantization_config in their config.json, so vLLM detects FP8
+        # automatically.  We still set is_fp8=True for KV cache dtype logic.
+
+        # Also detect native FP8 models (quantization_config.quant_method="fp8"
+        # in the model's config.json) for KV cache logic.
+        if not is_fp8:
+            try:
+                from transformers import AutoConfig
+                _auto_cfg = AutoConfig.from_pretrained(model_id, trust_remote_code=trust)
+                _qcfg = getattr(_auto_cfg, "quantization_config", None)
+                if _qcfg is None:
+                    _text_cfg = getattr(_auto_cfg, "text_config", None)
+                    if _text_cfg is not None:
+                        _qcfg = getattr(_text_cfg, "quantization_config", None)
+                if _qcfg is not None:
+                    _qm = _qcfg if isinstance(_qcfg, dict) else getattr(_qcfg, "__dict__", {})
+                    if _qm.get("quant_method") == "fp8":
+                        is_fp8 = True
+            except Exception:
+                pass
+
+        # KV cache dtype: auto-detect for FP8 on H100+, or use explicit config.
+        kv_dtype = config.model.kv_cache_dtype
+        if kv_dtype is None and is_fp8:
+            # Auto: use fp8_e4m3 KV cache on H100+ (SM >= 90) for 2x KV capacity.
+            if torch.cuda.is_available():
+                cc = torch.cuda.get_device_capability(0)
+                if cc[0] >= 9:
+                    kv_dtype = "fp8_e4m3"
+        if kv_dtype is not None:
+            kwargs["kv_cache_dtype"] = kv_dtype
 
         self.llm = LLM(**kwargs)
         self.tokenizer = self.llm.get_tokenizer()
 
-        # Adapter management — reuse a single directory to avoid disk bloat.
+        # Adapter management — use tmpfs (/dev/shm) to avoid disk I/O overhead
+        # during per-trial LoRA hot-swap.  Falls back to /tmp if /dev/shm is
+        # unavailable (e.g. macOS, containers without tmpfs).
+        tmpfs_base = "/dev/shm" if os.path.isdir("/dev/shm") else tempfile.gettempdir()
         self._adapter_dir = os.path.join(
-            tempfile.mkdtemp(prefix="abliterix_lora_"), "current"
+            tempfile.mkdtemp(prefix="abliterix_lora_", dir=tmpfs_base), "current"
         )
         # Use a fixed adapter ID so vLLM treats reloads as the same adapter.
         self._adapter_id = 1
@@ -381,6 +424,202 @@ class ProjectionCache:
         self.projections: dict[int, dict[str, dict[str, Any]]] = {}
         self.steering_vectors: Tensor | None = None
         self.target_modules: list[str] = []
+
+    @staticmethod
+    def build_from_safetensors(
+        config: "AbliterixConfig",
+        steering_vectors: Tensor,
+    ) -> "ProjectionCache":
+        """Build projection cache directly from safetensors files on disk.
+
+        This avoids loading the full HF model (3+ min for 230GB MoE models),
+        instead reading only the steerable weight tensors from the safetensors
+        files and computing ``sv @ W`` projections one tensor at a time.
+
+        For MiniMax-M2.5 (256 experts × 62 layers), this reads ~15,872 weight
+        tensors but only keeps one in memory at a time.
+        """
+        import json as _json
+        import re
+        from pathlib import Path
+        from huggingface_hub import snapshot_download
+        from safetensors import safe_open
+        from transformers import AutoConfig
+
+        cache = ProjectionCache()
+        cache.steering_vectors = steering_vectors.cpu()
+        sv = steering_vectors
+
+        model_id = config.model.model_id
+        trust = config.model.trust_remote_code or False
+
+        # Resolve model directory (local path or HF cache).
+        model_dir = Path(model_id)
+        if not model_dir.is_dir():
+            model_dir = Path(snapshot_download(model_id, allow_patterns=["*.json"]))
+            # Ensure safetensors are downloaded too.
+            snapshot_download(model_id, allow_patterns=["*.safetensors"])
+            model_dir = Path(snapshot_download(model_id))
+
+        # Load model config for architecture info.
+        auto_cfg = AutoConfig.from_pretrained(str(model_dir), trust_remote_code=trust)
+        text_cfg = getattr(auto_cfg, "text_config", auto_cfg)
+        n_layers = text_cfg.num_hidden_layers
+
+        # Load FP8 quantization info.
+        qcfg = getattr(text_cfg, "quantization_config", None)
+        if qcfg is None:
+            cfg_path = model_dir / "config.json"
+            if cfg_path.exists():
+                with open(cfg_path) as f:
+                    raw = _json.load(f)
+                qcfg = raw.get("quantization_config", {})
+        if not isinstance(qcfg, dict):
+            qcfg = getattr(qcfg, "__dict__", {})
+        is_fp8 = qcfg.get("quant_method") == "fp8"
+
+        # Load safetensors index.
+        index_path = model_dir / "model.safetensors.index.json"
+        if index_path.exists():
+            with open(index_path) as f:
+                weight_map = _json.load(f)["weight_map"]
+        else:
+            # Single-file model.
+            st_file = next(model_dir.glob("*.safetensors"))
+            with safe_open(str(st_file), framework="pt") as f:
+                weight_map = {k: st_file.name for k in f.keys()}
+
+        # Discover steerable weight keys using naming patterns.
+        # These match the patterns in engine.steerable_modules():
+        _STEERABLE_PATTERNS = [
+            # attn.o_proj: standard self-attention output
+            (r"model\.layers\.(\d+)\.self_attn\.o_proj\.weight$", "attn.o_proj"),
+            # attn.o_proj: GatedDeltaNet linear attention
+            (r"model\.layers\.(\d+)\.linear_attn\.out_proj\.weight$", "attn.o_proj"),
+            # mlp.down_proj: dense MLP
+            (r"model\.layers\.(\d+)\.mlp\.down_proj\.weight$", "mlp.down_proj"),
+            # mlp.down_proj: per-expert (Qwen3 MoE)
+            (r"model\.layers\.(\d+)\.mlp\.experts\.(\d+)\.down_proj\.weight$", "mlp.down_proj"),
+            # mlp.down_proj: shared expert (Qwen3)
+            (r"model\.layers\.(\d+)\.mlp\.shared_expert\.down_proj\.weight$", "mlp.down_proj"),
+            # mlp.down_proj: shared experts (GLM-4)
+            (r"model\.layers\.(\d+)\.mlp\.shared_experts\.down_proj\.weight$", "mlp.down_proj"),
+            # mlp.down_proj: Phi-3.5-MoE block_sparse_moe.experts.*.w2
+            (r"model\.layers\.(\d+)\.block_sparse_moe\.experts\.(\d+)\.w2\.weight$", "mlp.down_proj"),
+        ]
+
+        # Group steerable keys by (layer_idx, component).
+        steerable_keys: dict[int, dict[str, list[str]]] = {}
+        compiled = [(re.compile(p), comp) for p, comp in _STEERABLE_PATTERNS]
+
+        for key in weight_map:
+            for regex, component in compiled:
+                m = regex.match(key)
+                if m:
+                    layer_idx = int(m.group(1))
+                    if layer_idx < n_layers:
+                        steerable_keys.setdefault(layer_idx, {}).setdefault(
+                            component, []
+                        ).append(key)
+                    break
+
+        # Pre-compute sv @ W for each steerable weight.
+        target_module_names: set[str] = set()
+        _open_files: dict[str, Any] = {}  # cache file handles
+
+        def _get_tensor(key: str) -> Tensor:
+            shard = weight_map[key]
+            if shard not in _open_files:
+                _open_files[shard] = safe_open(
+                    str(model_dir / shard), framework="pt", device="cpu"
+                )
+            return _open_files[shard].get_tensor(key)
+
+        for layer_idx in sorted(steerable_keys):
+            cache.projections[layer_idx] = {}
+            for component, keys in steerable_keys[layer_idx].items():
+                for wkey in keys:
+                    # Read weight tensor.
+                    w_raw = _get_tensor(wkey)
+
+                    # Dequantize FP8 if needed.
+                    _FP8 = {torch.float8_e4m3fn, torch.float8_e5m2}
+                    if is_fp8 and w_raw.dtype in _FP8:
+                        # Check both scale tensor naming conventions:
+                        # weight_scale_inv (DeepSeek/Qwen/MiniMax) and weight_scale.
+                        scale_key_inv = wkey.replace(".weight", ".weight_scale_inv")
+                        scale_key_fwd = wkey.replace(".weight", ".weight_scale")
+                        is_inv = True
+                        if scale_key_inv in weight_map:
+                            scale_key = scale_key_inv
+                        elif scale_key_fwd in weight_map:
+                            scale_key = scale_key_fwd
+                            is_inv = False
+                        else:
+                            scale_key = None
+
+                        if scale_key is not None:
+                            scale = _get_tensor(scale_key).float()
+                            w_f = w_raw.to(torch.bfloat16).float()
+                            # Block-wise FP8: scale shape is (rows/block, cols/block).
+                            # Expand both dims to match weight shape.
+                            block_r = max(1, w_f.shape[0] // scale.shape[0])
+                            block_c = max(1, w_f.shape[1] // scale.shape[1])
+                            s_exp = scale.repeat_interleave(block_r, dim=0).repeat_interleave(block_c, dim=1)
+                            s_exp = s_exp[:w_f.shape[0], :w_f.shape[1]]
+                            if is_inv:
+                                W = (w_f * s_exp).to(torch.float32)
+                            else:
+                                W = (w_f / s_exp).to(torch.float32)
+                        else:
+                            W = w_raw.to(torch.float32)
+                    else:
+                        W = w_raw.to(torch.float32)
+                    del w_raw
+
+                    W = W.view(W.shape[0], -1)
+                    d_out, d_in = W.shape
+
+                    # Derive the module path for PEFT state dict.
+                    # Strip ".weight" suffix → "model.layers.X.self_attn.o_proj"
+                    module_path = wkey.rsplit(".weight", 1)[0]
+                    leaf = module_path.split(".")[-1]
+                    target_module_names.add(leaf)
+
+                    # sv @ W — all steering vectors at once.
+                    vW_all = (sv @ W).cpu()
+                    del W
+
+                    cache.projections[layer_idx][component] = {
+                        "vW_all": vW_all,
+                        "module_path": module_path,
+                        "d_out": d_out,
+                        "d_in": d_in,
+                    }
+
+        # Close file handles.
+        _open_files.clear()
+
+        if not cache.projections:
+            raise RuntimeError(
+                f"build_from_safetensors found 0 steerable weight keys in "
+                f"{model_dir}.  The model's weight naming may not match the "
+                f"expected patterns.  Run scripts/verify_minimax_m25.py to "
+                f"diagnose, or fall back to HF model loading (remove speculators)."
+            )
+
+        cache.target_modules = sorted(target_module_names)
+        n_cached = sum(len(v) for v in cache.projections.values())
+        cache_mb = sum(
+            info["vW_all"].nbytes
+            for layer in cache.projections.values()
+            for info in layer.values()
+        ) / 1024 / 1024
+        print(
+            f"* Projection cache (safetensors): {n_cached} modules across "
+            f"{n_layers} layers ({cache_mb:.0f} MB)"
+        )
+        return cache
 
     @staticmethod
     def build(engine, steering_vectors: Tensor) -> "ProjectionCache":

@@ -62,8 +62,8 @@ else
   pip install flash-attn --no-build-isolation 2>/dev/null || echo "flash-attn install failed (will fall back to SDPA)"
 fi
 
-# vLLM for Phase 2 tensor-parallel generation
-pip install "vllm>=0.8"
+# vLLM for Phase 2 tensor-parallel generation + speculators for fast Phase 1
+pip install "vllm>=0.8" "speculators>=0.1.9"
 
 # --- MoE kernel optimization ------------------------------------------------
 # Use CUTLASS grouped GEMM for MoE expert layers (faster than DeepGEMM on H100).
@@ -71,9 +71,13 @@ pip install "vllm>=0.8"
 # See: https://github.com/vllm-project/vllm/pull/28422
 export VLLM_MOE_USE_DEEP_GEMM=0
 
+# --- CUDA memory optimization -----------------------------------------------
+# Expandable segments reduce fragmentation on multi-GPU setups.
+export PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True"
+
 # --- Project checkout -----------------------------------------------------
 cd "$BIG_DISK/abliterix"
-pip install -e . --no-deps
+pip install -e ".[vllm]" --no-deps
 pip install optuna peft datasets bitsandbytes pydantic-settings questionary hf-transfer psutil kernels rich 2>/dev/null || true
 
 # --- Pre-flight verification ----------------------------------------------

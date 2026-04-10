@@ -20,7 +20,7 @@ from abliterix.types import ChatMessage, SteeringProfile
 # ---------------------------------------------------------------------------
 
 
-def test_steering_vectors_to_scoring_pipeline(synthetic_states, prometheus_config):
+def test_steering_vectors_to_scoring_pipeline(synthetic_states, abliterix_config):
     """Compute vectors from synthetic states and verify they feed into apply_steering."""
     from abliterix.vectors import compute_steering_vectors
     from abliterix.core.steering import apply_steering
@@ -67,7 +67,7 @@ def test_steering_vectors_with_orthogonal_projection(synthetic_states):
 # ---------------------------------------------------------------------------
 
 
-def test_trial_to_model_card_pipeline(mock_trial, prometheus_config):
+def test_trial_to_model_card_pipeline(mock_trial, abliterix_config):
     """format_trial_params and generate_model_card should work together."""
     from abliterix.data import format_trial_params, generate_model_card
 
@@ -76,7 +76,7 @@ def test_trial_to_model_card_pipeline(mock_trial, prometheus_config):
     assert "q_proj.max_weight" in params
 
     target_msgs = [ChatMessage(system="", user=f"P{i}") for i in range(10)]
-    card = generate_model_card(prometheus_config, mock_trial, 10, target_msgs)
+    card = generate_model_card(abliterix_config, mock_trial, 10, target_msgs)
 
     # Card should contain the formatted parameters
     assert "q_proj" in card
@@ -88,11 +88,11 @@ def test_trial_to_model_card_pipeline(mock_trial, prometheus_config):
 # ---------------------------------------------------------------------------
 
 
-def test_detector_keyword_pipeline(prometheus_config):
+def test_detector_keyword_pipeline(abliterix_config):
     """RefusalDetector should classify responses using keyword matching."""
     from abliterix.eval.detector import RefusalDetector
 
-    detector = RefusalDetector(prometheus_config)
+    detector = RefusalDetector(abliterix_config)
     try:
         # Clear refusals
         assert not detector.detect_refusal("Here's how to do that: step 1...")

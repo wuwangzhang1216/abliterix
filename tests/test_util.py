@@ -1,4 +1,4 @@
-"""Tests for prometheus.util — helper functions."""
+"""Tests for abliterix.util — helper functions."""
 
 from abliterix.util import (
     chunk_batches,

@@ -33,7 +33,7 @@ from questionary import Choice
 from rich.traceback import install
 
 from .analysis import ResidualAnalyzer
-from .core.engine import SteeringEngine
+from .core.engine import SteeringEngine, load_tokenizer
 from .data import load_prompt_dataset
 from .eval.detector import RefusalDetector
 from .eval.scorer import TrialScorer
@@ -211,11 +211,20 @@ def _handle_existing_checkpoint(
 
 
 def _speculators_available() -> bool:
-    """Check if the speculators library is installed."""
+    """Check if the speculators library is installed and compatible."""
     try:
         from speculators.data_generation import VllmHiddenStatesGenerator  # noqa: F401
         return True
-    except ImportError:
+    except (ImportError, Exception):
+        return False
+
+
+def _vllm_hidden_states_available() -> bool:
+    """Check if vLLM's native hidden state extraction API is available (>= 0.17)."""
+    try:
+        from vllm.distributed.kv_transfer.kv_connector.v1.example_hidden_states_connector import ExampleHiddenStatesConnector  # noqa: F401
+        return True
+    except (ImportError, Exception):
         return False
 
 
@@ -411,7 +420,7 @@ def run():
             print(f"[bold]{err['loc'][0]}[/]: [yellow]{err['msg']}[/]")
         print()
         print(
-            "Run [bold]prometheus --help[/] or see [bold]abliterix.toml[/] for details "
+            "Run [bold]abliterix --help[/] or see [bold]abliterix.toml[/] for details "
             "about configuration parameters."
         )
         return
@@ -458,13 +467,41 @@ def run():
     target_msgs = load_prompt_dataset(config, config.target_prompts)
     print(f"* [bold]{len(target_msgs)}[/] prompts loaded")
 
-    # ----- speculators fast path (vLLM backend only) -----
-    # Extract hidden states with vLLM tensor parallelism BEFORE loading
-    # the HF model.  This avoids the slow HF pipeline-parallel forward
-    # passes (~4 tok/s) and uses all GPUs simultaneously (~50+ tok/s).
+    # ----- Fast hidden state extraction (TP backend only) -----
+    # Priority: 1) vLLM native extract_hidden_states (>= 0.17)
+    #           2) speculators + vLLM (if compatible)
+    #           3) Fall back to HF pipeline parallelism (slow)
     _precomputed_benign_states = None
     _precomputed_target_states = None
-    if config.model.backend == "vllm" and _speculators_available():
+    if config.model.backend in ("vllm", "sglang") and _vllm_hidden_states_available():
+        from .core.vllm_hidden_states import extract_hidden_states_vllm, is_model_supported
+        if not is_model_supported(config):
+            print()
+            print(
+                f"[yellow]vLLM extract_hidden_states does not support this model type. "
+                f"Falling back to HF pipeline parallelism.[/]"
+            )
+            # Skip to HF fallback below
+            _vllm_hs_ok = False
+        else:
+            _vllm_hs_ok = True
+    else:
+        _vllm_hs_ok = False
+
+    if _vllm_hs_ok:
+
+        print()
+        print("[bold]Fast hidden state extraction (vLLM native TP)[/]")
+        print("* Extracting residuals for benign prompts...")
+        _precomputed_benign_states = extract_hidden_states_vllm(
+            config, benign_msgs,
+        )
+        print("* Extracting residuals for target prompts...")
+        _precomputed_target_states = extract_hidden_states_vllm(
+            config, target_msgs,
+        )
+        print()
+    elif config.model.backend in ("vllm", "sglang") and _speculators_available():
         from .core.speculators_backend import extract_hidden_states_speculators
 
         print()
@@ -478,19 +515,94 @@ def run():
             config, target_msgs,
         )
         print()
+    elif config.model.backend in ("vllm", "sglang"):
+        print()
+        print(
+            "[yellow bold]WARNING: No fast hidden state extraction available![/]\n"
+            "  vLLM native API requires >= 0.17, speculators not installed.\n"
+            "  Phase 1 will use HF pipeline parallelism (~4 tok/s — 10-15x slower)."
+        )
+        print()
 
-    engine = SteeringEngine(config)
+    # When speculators handled hidden state extraction AND we're using a TP
+    # backend, the HF model is not needed for Phase 1 at all.  Skip loading
+    # it to save 3+ minutes on large MoE models.
+    _skip_hf_model = (
+        _precomputed_benign_states is not None
+        and config.model.backend in ("vllm", "sglang")
+    )
+
+    if _skip_hf_model:
+        print()
+        print(
+            "[bold green]Fast path: skipping HF model load[/] "
+            "(speculators handled hidden states, projections from safetensors)"
+        )
+        # Create a lightweight engine with only tokenizer (no model weights).
+        engine = SteeringEngine.__new__(SteeringEngine)
+        engine.config = config
+        engine.response_prefix = ""
+        engine.needs_reload = False
+        engine._dequant_cache = {}
+        engine._cached_n_layers = None
+        engine._cached_components = None
+        engine._is_native_fp8 = False
+        engine.tokenizer = load_tokenizer(
+            config.model.model_id,
+            trust_remote_code=config.model.trust_remote_code,
+        )
+        if engine.tokenizer.pad_token is None:
+            engine.tokenizer.pad_token = engine.tokenizer.eos_token
+        engine.tokenizer.padding_side = "left"
+        engine.model = None
+        engine.max_memory = None
+        engine.trusted_models = {}
+    else:
+        engine = SteeringEngine(config)
+
     print()
     report_memory()
 
-    if config.inference.batch_size == 0:
-        config.inference.batch_size = _auto_batch_size(engine, benign_msgs, config)
-
-    _detect_response_prefix(engine, benign_msgs, target_msgs)
+    # For TP backends, skip expensive HF-based auto batch size tuning and
+    # response prefix detection.  These will be done after the fast TP
+    # backend loads (or deferred entirely).
+    if config.model.backend in ("vllm", "sglang"):
+        if config.inference.batch_size == 0:
+            config.inference.batch_size = config.inference.max_batch_size
+            print(
+                f"* TP backend: skipping HF batch-size tuning, "
+                f"using batch_size={config.inference.batch_size}"
+            )
+        if not _skip_hf_model:
+            # HF model is loaded — do minimal prefix detection.
+            print()
+            print("Checking for common response prefix (minimal for TP backend)...")
+            _mini_sample = benign_msgs[:1] + target_msgs[:1]
+            responses = engine.generate_text_batched(_mini_sample, max_new_tokens=20)
+            from os.path import commonprefix
+            engine.response_prefix = commonprefix(responses).rstrip(" ")
+            if engine.response_prefix:
+                _COT = {"<think>": "<think></think>", "<thought>": "<thought></thought>"}
+                for pat, repl in _COT.items():
+                    if engine.response_prefix.startswith(pat):
+                        engine.response_prefix = repl
+                        break
+                print(f"* Prefix found: [bold]{engine.response_prefix!r}[/]")
+            else:
+                print("* None found")
+        # else: prefix detection deferred to after TP backend loads
+    else:
+        if config.inference.batch_size == 0:
+            config.inference.batch_size = _auto_batch_size(engine, benign_msgs, config)
+        _detect_response_prefix(engine, benign_msgs, target_msgs)
 
     detector = RefusalDetector(config)
     try:
-        scorer = TrialScorer(config, engine, detector)
+        # For TP backends, defer baseline capture until after the fast backend
+        # is loaded.  Otherwise baseline generation runs on HF pipeline
+        # parallelism (~4 tok/s for 200 prompts = ~40 min wasted).
+        _defer = config.model.backend in ("vllm", "sglang")
+        scorer = TrialScorer(config, engine, detector, defer_baseline=_defer)
 
         # Evaluation-only mode: load a second model and score it.
         if config.model.evaluate_model_id is not None:
@@ -571,53 +683,100 @@ def run():
         # Skip for vLLM backend — expert routing is not supported in vLLM mode
         # (only LoRA weight steering is applied).
         safety_experts: dict[int, list[tuple[int, float]]] | None = None
-        if engine.has_expert_routing() and config.model.backend != "vllm":
+        if engine.has_expert_routing() and config.model.backend not in ("vllm", "sglang"):
             print()
             print("Profiling MoE expert activations...")
             safety_experts = engine.identify_safety_experts(benign_msgs, target_msgs)
 
-        # ----- vLLM backend: Phase transition -----
-        vllm_gen = None
+        # ----- TP backend: Phase transition (vLLM or SGLang) -----
+        tp_gen = None
         projection_cache = None
-        if config.model.backend == "vllm":
-            from .core.vllm_backend import ProjectionCache, VLLMGenerator
+        if config.model.backend in ("vllm", "sglang"):
+            from .core.vllm_backend import ProjectionCache
 
+            backend_name = config.model.backend.upper()
             print()
-            print("[bold]Phase transition: HF → vLLM[/]")
+            print(f"[bold]Phase transition: HF → {backend_name}[/]")
 
-            # Pre-compute LoRA projections while HF model is still loaded.
+            # Build projection cache.  If the HF model is loaded (needed for
+            # non-speculators path), use it.  Otherwise read weights directly
+            # from safetensors on disk — avoids the 3+ min HF model load.
             print("* Building LoRA projection cache...")
-            projection_cache = ProjectionCache.build(engine, vectors)
-
-            # Unload HF model to free VRAM for vLLM.
-            print("* Unloading HF model...")
-            engine.prepare_for_unload()
-            engine.model = None
+            if engine.model is not None:
+                projection_cache = ProjectionCache.build(engine, vectors)
+                # Unload HF model to free VRAM for the TP backend.
+                print("* Unloading HF model...")
+                engine.prepare_for_unload()
+                engine.model = None
+            else:
+                # HF model was never loaded (speculators handled everything).
+                # Build projections directly from safetensors files.
+                projection_cache = ProjectionCache.build_from_safetensors(
+                    config, vectors,
+                )
             flush_memory()
             report_memory()
 
-            # Load model with vLLM tensor parallelism.
+            # Load model with tensor parallelism.
             print()
-            print("Loading model with vLLM tensor parallelism...")
-            vllm_gen = VLLMGenerator(config)
+            if config.model.backend == "sglang":
+                print("Loading model with SGLang (TP + LoRA overlap loading)...")
+                from .core.sglang_backend import SGLangGenerator
+                tp_gen = SGLangGenerator(config)
+            else:
+                print("Loading model with vLLM tensor parallelism...")
+                from .core.vllm_backend import VLLMGenerator
+                tp_gen = VLLMGenerator(config)
 
-            # Attach vLLM generator and projection cache to engine
+            # Attach TP generator and projection cache to engine
             # so the optimizer can use them.
-            engine._vllm_gen = vllm_gen
+            engine._vllm_gen = tp_gen
             engine._projection_cache = projection_cache
             engine._current_adapter_path = None  # baseline = no adapter
 
-            # Re-capture baseline logprobs with vLLM so KL comparisons
-            # use the same backend (top-K approximate logprobs).
-            print("* Re-capturing baseline logprobs with vLLM...")
-            base_resp, scorer.baseline_logprobs = vllm_gen.generate_and_score_batched(
-                scorer.benign_msgs,
-                max_new_tokens=config.inference.max_gen_tokens,
-                kl_token_count=config.kl.token_count,
-                skip_special_tokens=True,
-                adapter_path=None,  # base model
-            )
+            # If engine has no model (lightweight mode), populate cached
+            # metadata from the projection cache so optimizer can query it.
+            if engine.model is None and engine._cached_n_layers is None:
+                engine._cached_n_layers = max(projection_cache.projections.keys()) + 1
+                engine._cached_components = sorted({
+                    comp for layer in projection_cache.projections.values()
+                    for comp in layer
+                })
+
+            # Detect response prefix via the fast TP backend (if not done earlier).
+            if not engine.response_prefix:
+                print("* Detecting response prefix via TP backend...")
+                _mini = benign_msgs[:2] + target_msgs[:2]
+                _resps = tp_gen.generate_text_batched(_mini, max_new_tokens=20)
+                from os.path import commonprefix as _cp
+                engine.response_prefix = _cp(_resps).rstrip(" ")
+                if engine.response_prefix:
+                    _COT = {"<think>": "<think></think>", "<thought>": "<thought></thought>"}
+                    for _pat, _repl in _COT.items():
+                        if engine.response_prefix.startswith(_pat):
+                            engine.response_prefix = _repl
+                            break
+                    print(f"  Prefix: [bold]{engine.response_prefix!r}[/]")
+                else:
+                    print("  None found")
+
+            # Capture full baseline (logprobs, response lengths, refusal count)
+            # using the TP backend.  This was deferred from TrialScorer init
+            # to avoid running expensive generation on HF pipeline parallelism.
+            print(f"* Capturing baseline metrics with {backend_name}...")
+            scorer._capture_baseline(engine)
             print("  [green]Ok[/]")
+
+        # Safety check: if TP backend was requested but failed to load,
+        # the optimizer would silently fall back to HF pipeline parallelism
+        # (~4 tok/s instead of ~500 tok/s).  Abort early.
+        if config.model.backend in ("vllm", "sglang"):
+            if getattr(engine, "_vllm_gen", None) is None:
+                raise RuntimeError(
+                    f"TP backend '{config.model.backend}' was requested but failed "
+                    f"to load.  Refusing to fall back to HF pipeline parallelism "
+                    f"(would be ~100x slower).  Fix the backend installation and retry."
+                )
 
         study = run_search(
             config, engine, scorer, vectors, safety_experts, storage,

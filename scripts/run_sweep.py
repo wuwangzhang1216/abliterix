@@ -6,7 +6,7 @@
 
 """Automated steering experiment runner.
 
-Generates variant config TOML files from a baseline template and runs Prometheus
+Generates variant config TOML files from a baseline template and runs Abliterix
 for each variant in non-interactive mode.
 
 Usage:
@@ -212,7 +212,7 @@ def run_variant(variant_name: str, config_path: str) -> dict:
 
     cmd = [
         sys.executable,
-        os.path.join(os.path.dirname(os.path.abspath(__file__)), "run_prometheus.py"),
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), "run_abliterix.py"),
     ]
 
     env = os.environ.copy()
@@ -333,7 +333,7 @@ def extract_results(checkpoint_dir: str, variant_name: str) -> dict | None:
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Run Prometheus steering experiments")
+    parser = argparse.ArgumentParser(description="Run Abliterix steering experiments")
     parser.add_argument(
         "--model", default="Qwen/Qwen3.5-0.8B", help="Hugging Face model ID"
     )

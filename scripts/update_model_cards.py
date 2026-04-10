@@ -4,7 +4,7 @@
 #
 # SPDX-License-Identifier: AGPL-3.0-or-later
 
-"""Update model cards for all Prometheus abliterated models on Hugging Face.
+"""Update model cards for all Abliterix abliterated models on Hugging Face.
 
 Usage:
     python scripts/update_model_cards.py
@@ -135,7 +135,7 @@ def build_card(m: dict) -> ModelCard:
     text = f"""\
 # {m["model_name"]}-abliterated
 
-> Unrestricted version of [{m["base_model"]}](https://huggingface.co/{m["base_model"]}), created with **[Prometheus](https://github.com/wuwangzhang1216/abliterix)** \u2014 automated LLM abliteration via orthogonalized steering and Bayesian optimization.
+> Unrestricted version of [{m["base_model"]}](https://huggingface.co/{m["base_model"]}), created with **[Abliterix](https://github.com/wuwangzhang1216/abliterix)** \u2014 automated LLM abliteration via orthogonalized steering and Bayesian optimization.
 
 ## Highlights
 
@@ -149,14 +149,14 @@ def build_card(m: dict) -> ModelCard:
 
 ## How It Works
 
-Prometheus removes safety-refusal behavior while preserving model capabilities:
+Abliterix removes safety-refusal behavior while preserving model capabilities:
 
 1. **Refusal direction extraction** \u2014 800 harmful + 800 benign prompts reveal per-layer refusal activation patterns
 2. **Orthogonal projection** \u2014 isolates the refusal signal by projecting out components aligned with normal responses, reducing refusals by 67% vs. raw abliteration
 3. **LoRA-based abliteration** \u2014 rank-1 modifications to attention and MLP weights, captured as lightweight adapters (not destructive edits)
 4. **Bayesian optimization** \u2014 Optuna TPE searches kernel shape, fractional direction index, and per-component strength across {m["trials"]} trials to find the Pareto-optimal balance of low refusals and low KL divergence
 
-## All Prometheus Models
+## All Abliterix Models
 
 {ALL_MODELS_TABLE}
 
@@ -178,9 +178,9 @@ print(tokenizer.decode(outputs[0], skip_special_tokens=True))
 ## Citation
 
 ```bibtex
-@software{{prometheus,
+@software{{abliterix,
   author = {{Wu, Wangzhang}},
-  title = {{Prometheus: Automated LLM Abliteration}},
+  title = {{Abliterix: Automated LLM Abliteration}},
   year = {{2026}},
   url = {{https://github.com/wuwangzhang1216/abliterix}}
 }}
@@ -188,13 +188,13 @@ print(tokenizer.decode(outputs[0], skip_special_tokens=True))
 
 ## Links
 
-- **Prometheus** (abliteration framework): [github.com/wuwangzhang1216/abliterix](https://github.com/wuwangzhang1216/abliterix)
-- **Install**: `pip install -U prometheus-llm`
+- **Abliterix** (abliteration framework): [github.com/wuwangzhang1216/abliterix](https://github.com/wuwangzhang1216/abliterix)
+- **Install**: `pip install -U abliterix`
 - **Base model**: [{m["base_model"]}](https://huggingface.co/{m["base_model"]})
 
 ---
 
-Built with [Prometheus](https://github.com/wuwangzhang1216/abliterix) | [PyPI](https://pypi.org/project/prometheus-llm/)
+Built with [Abliterix](https://github.com/wuwangzhang1216/abliterix) | [PyPI](https://pypi.org/project/abliterix/)
 """
 
     card = ModelCard(text)
@@ -204,7 +204,7 @@ Built with [Prometheus](https://github.com/wuwangzhang1216/abliterix) | [PyPI](h
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Update model cards for all Prometheus abliterated models"
+        description="Update model cards for all Abliterix abliterated models"
     )
     parser.add_argument(
         "--dry-run",

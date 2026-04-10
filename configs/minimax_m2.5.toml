@@ -15,7 +15,7 @@
 model_id = "MiniMaxAI/MiniMax-M2.5"
 dtype_fallback_order = ["auto"]
 quant_method = "fp8"
-skip_fp8_dequant = true
+# skip_fp8_dequant: auto-detect (H100+ with transformers >= 5.2 → native FP8)
 attn_implementation = "flash_attention_2"
 use_torch_compile = false
 device_map = "auto"

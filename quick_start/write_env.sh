@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-OUT_PATH="${1:-/root/prometheus.env}"
+OUT_PATH="${1:-/root/abliterix.env}"
 
 read -r -s -p "OPENROUTER_API_KEY: " OPENROUTER_API_KEY
 printf '\n'

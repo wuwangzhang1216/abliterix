@@ -1,4 +1,4 @@
-"""Tests for prometheus.core.steering — decay kernels, dequant, interpolation, LoRA math.
+"""Tests for abliterix.core.steering — decay kernels, dequant, interpolation, LoRA math.
 
 All tests use synthetic tensors and reproduce the math from apply_steering()
 without loading a model.

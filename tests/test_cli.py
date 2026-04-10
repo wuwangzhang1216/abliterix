@@ -1,4 +1,4 @@
-"""Integration tests for prometheus.cli — config loading, CLI aliases, and error handling."""
+"""Integration tests for abliterix.cli — config loading, CLI aliases, and error handling."""
 
 import sys
 import os

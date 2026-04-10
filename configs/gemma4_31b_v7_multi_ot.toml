@@ -1,0 +1,91 @@
+# Gemma 4 31B — v7 Multi-Direction Optimal Transport
+# Goal: Near-zero refusals (0-5/100)
+#
+# Strategy (proven on Qwen3.5-4B zero_refusal config):
+#   - OT matches full harmful→harmless activation distribution (mean + covariance)
+#   - 3 independent refusal directions capture residual refusal pathways
+#     that a single direction misses (Gemma 4's dual-attention types
+#     likely encode refusal along multiple axes)
+#   - Projected abliteration limits KL damage from multi-direction steering
+#   - More aggressive strength range since multi-direction dilutes per-direction impact
+
+[model]
+model_id = "google/gemma-4-31B-it"
+dtype_fallback_order = ["bfloat16"]
+quant_method = "none"
+use_torch_compile = false
+device_map = "auto"
+max_memory = {0 = "76GiB"}
+
+[inference]
+batch_size = 0
+max_batch_size = 4
+max_gen_tokens = 100
+
+[steering]
+# Optimal Transport: matches full distribution shape, not just mean
+vector_method = "optimal_transport"
+ot_components = 2
+
+# 3 independent refusal directions — catches multi-directional refusal
+# Gemma 4's interleaved architecture likely has >1 refusal subspace
+n_directions = 3
+
+# Projected abliteration: critical when using multiple directions
+projected_abliteration = true
+
+# Winsorize outliers
+winsorize_vectors = true
+winsorize_quantile = 0.995
+
+# LoRA mode (multi-direction requires weight modification)
+steering_mode = "lora"
+
+# Discriminative layers
+discriminative_layer_selection = true
+
+decay_kernel = "gaussian"
+weight_normalization = "none"
+
+# Multi-direction dilutes per-direction strength, allow higher max
+# Qwen 27B baseline is [1.0, 5.0], multi-dir needs even more headroom
+strength_range = [1.0, 6.0]
+
+[optimization]
+num_trials = 150
+num_warmup_trials = 40
+checkpoint_dir = "checkpoints_gemma4_31b_v7_multi_ot"
+
+[kl]
+scale = 1.0
+token_count = 3
+target = 0.02
+prune_threshold = 10.0   # Very permissive — multi-direction can cause higher KL initially
+
+[detection]
+llm_judge = true
+llm_judge_batch_size = 10
+llm_judge_concurrency = 35
+
+[benign_prompts]
+dataset = "datasets/good_500"
+split = "train[:400]"
+column = "prompt"
+
+[target_prompts]
+dataset = "datasets/harmful_500"
+split = "train[:400]"
+column = "prompt"
+
+[benign_eval_prompts]
+dataset = "datasets/good_500"
+split = "train[400:]"
+column = "prompt"
+
+[target_eval_prompts]
+dataset = "datasets/harmful_500"
+split = "train[400:]"
+column = "prompt"
+
+[display]
+print_responses = false

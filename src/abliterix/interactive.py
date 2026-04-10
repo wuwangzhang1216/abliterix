@@ -135,7 +135,7 @@ def _upload_model(
 
     repo_id = ask_text(
         "Name of repository:",
-        default=f"{user['name']}/{Path(config.model.model_id).name}-prometheus",
+        default=f"{user['name']}/{Path(config.model.model_id).name}-abliterix",
     )
     visibility = ask_choice(
         "Should the repository be public or private?",

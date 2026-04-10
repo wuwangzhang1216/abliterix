@@ -1,4 +1,4 @@
-"""Tests for prometheus.eval.scorer — multi-objective scoring math.
+"""Tests for abliterix.eval.scorer — multi-objective scoring math.
 
 Tests _compute_objectives() which is pure arithmetic.
 The TrialScorer is constructed by bypassing __init__ (which requires a model).

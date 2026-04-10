@@ -32,17 +32,32 @@ export TORCH_HOME="$BIG_DISK/torch_cache"
 mkdir -p "$HF_HOME" "$TORCH_HOME"
 
 # --- Dependencies ---------------------------------------------------------
-pip install -U "transformers>=4.46" accelerate safetensors sentencepiece
-# NOTE: compressed-tensors pins transformers<5.0.0 which conflicts with
-# abliterix (requires transformers 5.x). The Qwen3.5-FP8 checkpoint uses
-# native transformers FP8 (block-wise) and does not need compressed-tensors.
+pip install -U "transformers>=5.2" accelerate safetensors sentencepiece
+# NOTE: transformers >= 5.2 fixes FP8 Triton kernel bugs (div-by-zero in
+# act_quant_kernel, MoE weight_scale_inv shape mismatch).
+
+# vLLM for Phase 2 tensor-parallel generation + speculators for fast Phase 1
+pip install "vllm>=0.8" "speculators>=0.1.9"
+
+# --- MoE kernel optimization ------------------------------------------------
+export VLLM_MOE_USE_DEEP_GEMM=0
+export PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True"
 
 # --- Project checkout -----------------------------------------------------
 cd "$BIG_DISK/abliterix"
-pip install -e .
+pip install -e ".[vllm]" --no-deps
+pip install optuna peft datasets bitsandbytes pydantic-settings questionary hf-transfer psutil kernels rich 2>/dev/null || true
 
 # --- Pre-flight verification (cheap — no 400GB download) ------------------
 python scripts/verify_qwen35_397b_fp8.py
 
-# --- Run abliteration -----------------------------------------------------
-AX_CONFIG=configs/qwen3.5_397b_fp8.toml abliterix
+# --- Verify GPU count for TP -----------------------------------------------
+N_GPUS=$(python -c "import torch; print(torch.cuda.device_count())")
+echo "Detected $N_GPUS GPU(s)"
+if [ "$N_GPUS" -lt 6 ]; then
+  echo "ERROR: Need at least 6 GPUs for TP=6, found $N_GPUS"
+  exit 1
+fi
+
+# --- Run abliteration (use vLLM config for maximum throughput) ------------
+AX_CONFIG=configs/qwen3.5_397b_fp8_vllm.toml abliterix

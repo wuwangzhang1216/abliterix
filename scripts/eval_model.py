@@ -22,7 +22,7 @@ setup_io()
 
 parser = argparse.ArgumentParser(description="Evaluate refusal rate for a model")
 parser.add_argument("--model", required=True, help="Model ID or local path to evaluate")
-parser.add_argument("--config", default=None, help="Prometheus config path")
+parser.add_argument("--config", default=None, help="Abliterix config path")
 parser.add_argument(
     "--batch-size", type=int, default=0, help="Override inference batch size"
 )

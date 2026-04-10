@@ -1,36 +1,34 @@
-# Qwen3.5-397B-A17B (MoE) steering config — FP8 + vLLM tensor parallelism
+# Qwen3.5-397B-A17B (MoE) steering config — FP8 + SGLang tensor parallelism
 # 512 experts (10 routed + 1 shared), 60 layers, hidden=4096, expert_dim=1024
-# FP8: ~397GB weights — fits 6× H100 80GB (480GB) with headroom for activations
+# FP8: ~397GB weights — fits 6x H100 80GB (480GB) with headroom for activations
 # REQUIRES: Compute Capability >= 8.9 (H100/H200, SM89+). A100 is NOT supported.
 #
+# SGLang advantages: MoE LoRA fused kernels, LoRA weight loading overlap
+# (~78% TTFT reduction).  RadixAttention is auto-disabled for LoRA compat.
+# Requires: SGLang >= 0.5.10 (MoE LoRA support)
+#
 # Phase 1 (HF): hidden state extraction + vector computation (~10 min)
-# Phase 2 (vLLM TP=6): all generation with tensor parallelism (~2-3 hours)
+# Phase 2 (SGLang TP=6): all generation with tensor parallelism (~1.5-2 hours)
 
 [model]
 model_id = "Qwen/Qwen3.5-397B-A17B-FP8"
 dtype_fallback_order = ["auto"]
 quant_method = "fp8"
-# Fix Qwen3.5 MoE weight_scale_inv 1D/2D shape mismatch (transformers #42915)
 fp8_weight_block_size = [128, 128]
 use_torch_compile = false
 device_map = "auto"
 trust_remote_code = true
 # Phase 1: HF pipeline parallelism for hidden state extraction
 max_memory = {0 = "76GiB", 1 = "76GiB", 2 = "76GiB", 3 = "76GiB", 4 = "76GiB", 5 = "76GiB"}
-# Phase 2: vLLM tensor parallelism for generation
-backend = "vllm"
+# Phase 2: SGLang tensor parallelism for generation
+backend = "sglang"
 gpu_memory_utilization = 0.93
-# EP for MoE: 512 experts benefit from distribution across GPUs
-enable_expert_parallel = true
 enable_chunked_prefill = true
 enforce_eager = false
-# FP8 KV cache for 2x KV capacity on H100
 kv_cache_dtype = "fp8_e4m3"
 
 [inference]
 batch_size = 0
-# MoE active params = 17B — larger batch feasible since only 10 routed experts
-# are active per token. 8 is a good balance for 6× H100.
 max_batch_size = 8
 max_gen_tokens = 50
 
@@ -44,7 +42,7 @@ strength_range = [1.0, 10.0]
 [optimization]
 num_trials = 50
 num_warmup_trials = 10
-checkpoint_dir = "checkpoints_397b_fp8_vllm"
+checkpoint_dir = "checkpoints_397b_fp8_sglang"
 
 [kl]
 scale = 1.0

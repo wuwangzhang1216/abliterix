@@ -1,0 +1,92 @@
+# Gemma 4 26B-A4B — V4: EGA + norm preservation + Q/K/V + float32
+#
+# Key improvements over V3:
+#   - Expert-Granular Abliteration (EGA): projects refusal direction from ALL
+#     128 expert down_proj slices (not just top-N safety experts)
+#   - Norm preservation enabled (critical for double-norm architecture)
+#   - float32 projection precision (bf16 loses signal in 2816-dim inner products)
+#   - Q/K/V projections added as steerable targets (prevents attending to refusal)
+#   - Projected abliteration: preserves helpfulness-aligned signals
+#   - Relaxed KL prune threshold (strong trials were being pruned)
+#
+# Based on TrevorS EGA method (3/100 refusals on this model).
+#
+# Target hardware: RTX Pro 6000 (96 GB GDDR7), single GPU, BF16.
+
+[model]
+model_id = "google/gemma-4-26B-A4B-it"
+dtype_fallback_order = ["bfloat16"]
+quant_method = "none"
+use_torch_compile = false
+device_map = "auto"
+max_memory = {0 = "90GiB"}
+
+[inference]
+batch_size = 0
+max_batch_size = 16
+max_gen_tokens = 150
+
+[steering]
+steering_mode = "direct"
+vector_method = "mean"
+orthogonal_projection = true
+projected_abliteration = false
+winsorize_vectors = true
+winsorize_quantile = 0.995
+decay_kernel = "gaussian"
+
+# Norm preservation: critical for Gemma 4 double-norm architecture.
+# Without this, row norm changes cascade through 4× RMSNorm per layer.
+weight_normalization = "pre"
+
+# Strength range for dense layers (o_proj, q/k/v_proj, mlp.down_proj).
+# EGA applies the same mlp.down_proj profile to all 128 expert slices.
+strength_range = [0.5, 3.5]
+
+[experts]
+# Router suppression (complementary to EGA, targets top safety experts).
+max_suppress = 15
+router_bias_range = [-12.0, 0.0]
+ablation_weight_range = [0.0, 6.0]
+
+[optimization]
+num_trials = 120
+num_warmup_trials = 35
+checkpoint_dir = "checkpoints_gemma4_26b_a4b_v4"
+
+[kl]
+scale = 1.0
+token_count = 3
+target = 0.02
+# Relaxed: strong trials with aggressive expert ablation can hit high KL
+# but still achieve good compliance. Let the multi-objective optimizer decide.
+prune_threshold = 20.0
+
+[detection]
+llm_judge = true
+llm_judge_model = "google/gemini-3-flash-preview"
+llm_judge_batch_size = 10
+llm_judge_concurrency = 35
+
+[benign_prompts]
+dataset = "datasets/good_1000"
+split = "train[:400]"
+column = "prompt"
+
+[target_prompts]
+dataset = "datasets/harmful_1000"
+split = "train[:400]"
+column = "prompt"
+
+[benign_eval_prompts]
+dataset = "datasets/good_1000"
+split = "train[400:500]"
+column = "prompt"
+
+[target_eval_prompts]
+dataset = "datasets/harmful_1000"
+split = "train[400:500]"
+column = "prompt"
+
+[display]
+print_responses = false

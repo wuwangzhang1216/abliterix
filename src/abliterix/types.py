@@ -38,6 +38,7 @@ class SteeringMode(str, Enum):
     ADAPTIVE_ANGULAR = "adaptive_angular"
     SPHERICAL = "spherical"
     VECTOR_FIELD = "vector_field"
+    DIRECT = "direct"
 
 
 class WeightNorm(str, Enum):

@@ -53,8 +53,8 @@ class ResidualAnalyzer:
             print()
             print(
                 "[red]Research dependencies not found. Printing residual geometry requires "
-                "installing Prometheus with the optional research feature, i.e., "
-                'using "pip install -U prometheus-llm\\[research]".[/]'
+                "installing Abliterix with the optional research feature, i.e., "
+                'using "pip install -U abliterix\\[research]".[/]'
             )
             return
 
@@ -179,8 +179,8 @@ class ResidualAnalyzer:
             print()
             print(
                 "[red]Research dependencies not found. Plotting residuals requires "
-                "installing Prometheus with the optional research feature, i.e., "
-                'using "pip install -U prometheus-llm\\[research]".[/]'
+                "installing Abliterix with the optional research feature, i.e., "
+                'using "pip install -U abliterix\\[research]".[/]'
             )
             return
 

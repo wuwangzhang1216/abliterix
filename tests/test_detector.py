@@ -1,4 +1,4 @@
-"""Tests for prometheus.eval.detector — keyword-based refusal detection.
+"""Tests for abliterix.eval.detector — keyword-based refusal detection.
 
 These tests exercise the keyword matching logic without requiring a GPU,
 model, or external API.

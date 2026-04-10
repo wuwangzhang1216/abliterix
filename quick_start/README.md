@@ -1,6 +1,6 @@
-# Prometheus Quick Start - Run Models on a Remote GPU Host
+# Abliterix Quick Start - Run Models on a Remote GPU Host
 
-This guide describes the standard workflow for running Prometheus abliteration on a remote GPU machine, from environment setup to model upload.
+This guide describes the standard workflow for running Abliterix abliteration on a remote GPU machine, from environment setup to model upload.
 
 ## Key Lessons
 
@@ -32,26 +32,26 @@ The example below uses a 35B model. For other models, replace the model name, co
 ### 1. Upload the project from local Windows
 
 ```bash
-tar czf /tmp/prometheus.tar.gz \
+tar czf /tmp/abliterix.tar.gz \
   --exclude='.git' --exclude='__pycache__' --exclude='*.pyc' \
   --exclude='.venv' --exclude='checkpoints*' --exclude='node_modules' \
-  -C /path/to/prometheus .
+  -C /path/to/abliterix .
 
-scp -P PORT -i KEY /tmp/prometheus.tar.gz root@HOST:/root/
-ssh root@HOST -p PORT -i KEY 'mkdir -p /root/prometheus && tar xzf /root/prometheus.tar.gz -C /root/prometheus'
+scp -P PORT -i KEY /tmp/abliterix.tar.gz root@HOST:/root/
+ssh root@HOST -p PORT -i KEY 'mkdir -p /root/abliterix && tar xzf /root/abliterix.tar.gz -C /root/abliterix'
 ```
 
 ### 2. Initialize the remote environment
 
 ```bash
-bash quick_start/setup_remote.sh /root/prometheus /root/venv-prometheus
-bash quick_start/write_env.sh /root/prometheus.env
+bash quick_start/setup_remote.sh /root/abliterix /root/venv-abliterix
+bash quick_start/write_env.sh /root/abliterix.env
 ```
 
 ### 3. Run a smoke test
 
 ```bash
-source /root/prometheus.env && source /root/venv-prometheus/bin/activate
+source /root/abliterix.env && source /root/venv-abliterix/bin/activate
 python scripts/probe_harmful_model.py --model Qwen/Qwen3.5-35B-A3B
 ```
 
@@ -60,9 +60,9 @@ Confirm that the base model loads correctly, the tokenizer works, and the judge 
 ### 4. Start optimization
 
 ```bash
-source /root/prometheus.env && source /root/venv-prometheus/bin/activate
+source /root/abliterix.env && source /root/venv-abliterix/bin/activate
 tmux new-session -d -s prom \
-  "cd /root/prometheus && prometheus --model Qwen/Qwen3.5-35B-A3B --config configs/qwen3.5_35b.toml 2>&1 | tee logs/run.log"
+  "cd /root/abliterix && abliterix --model Qwen/Qwen3.5-35B-A3B --config configs/qwen3.5_35b.toml 2>&1 | tee logs/run.log"
 ```
 
 ### 5. Monitor progress

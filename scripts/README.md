@@ -1,17 +1,17 @@
-# Prometheus Test and Utility Scripts
+# Abliterix Test and Utility Scripts
 
-This directory contains scripts for local testing, dataset generation, and result analysis for the Prometheus project.
+This directory contains scripts for local testing, dataset generation, and result analysis for the Abliterix project.
 
-> **Important**: Run every script from the project root so relative paths such as `prometheus.toml`, `datasets/`, and `checkpoints*/` resolve correctly.
+> **Important**: Run every script from the project root so relative paths such as `abliterix.toml`, `datasets/`, and `checkpoints*/` resolve correctly.
 
 ## Script Reference
 
-### `run_prometheus.py` - Windows launcher wrapper
+### `run_abliterix.py` - Windows launcher wrapper
 
 This wrapper avoids Rich GBK encoding crashes on Windows. Before Rich initializes its console, it replaces `sys.stdout` and `sys.stderr` with UTF-8 `TextIOWrapper` instances.
 
 ```bash
-python scripts/run_prometheus.py --model Qwen/Qwen3.5-0.8B --batch-size 8
+python scripts/run_abliterix.py --model Qwen/Qwen3.5-0.8B --batch-size 8
 ```
 
 > **How it works**: Rich's `_win32_console.py` uses the Win32 `WriteConsoleW` API directly, which bypasses `PYTHONIOENCODING`. This wrapper makes Rich see a non-console file handle so it falls back to plain text output.
@@ -42,7 +42,7 @@ Requires the `OPENROUTER_API_KEY` environment variable.
 
 ### `eval_model.py` - model evaluation
 
-Loads a Hugging Face model or a local directory directly and evaluates Prometheus prompts to measure refusal rate, KL divergence, and length drift.
+Loads a Hugging Face model or a local directory directly and evaluates Abliterix prompts to measure refusal rate, KL divergence, and length drift.
 
 ```bash
 python scripts/eval_model.py \
@@ -128,7 +128,7 @@ python scripts/quantize_fp8.py \
 
 ### `run_sweep.py` - experiment runner
 
-Generates variant configs automatically and runs Prometheus experiments in batch.
+Generates variant configs automatically and runs Abliterix experiments in batch.
 
 ### `analyze_sweep.py` - experiment analysis
 
@@ -144,7 +144,7 @@ Runs four diagnostic experiments to validate optimization hypotheses: `output_sc
 
 ### `discover_model.py` - architecture discovery
 
-Inspects any HuggingFace model's architecture for Prometheus integration: config attributes, layer structure, steerable modules (attention/conv/MLP/MoE), router/gate discovery, fused expert weights, hidden states, chat template, and generation.
+Inspects any HuggingFace model's architecture for Abliterix integration: config attributes, layer structure, steerable modules (attention/conv/MLP/MoE), router/gate discovery, fused expert weights, hidden states, chat template, and generation.
 
 ```bash
 # Full discovery (loads model on GPU)
@@ -165,7 +165,7 @@ python scripts/push_model_card.py \
   --repo wangzhang/Devstral-Small-2-24B-Instruct-abliterated \
   --base-model mistralai/Devstral-Small-2-24B-Instruct-2512 \
   --card-file cards/devstral.md \
-  --tags prometheus uncensored abliterated mistral code \
+  --tags abliterix uncensored abliterated mistral code \
   --license apache-2.0 \
   --language en zh
 ```
@@ -188,8 +188,8 @@ See `docs/guidance.md` for details.
 # 1. Evaluate the base model refusal rate
 python scripts/eval_model.py --model Qwen/Qwen3.5-0.8B
 
-# 2. Run Prometheus optimization
-python scripts/run_prometheus.py --model Qwen/Qwen3.5-0.8B --batch-size 8
+# 2. Run Abliterix optimization
+python scripts/run_abliterix.py --model Qwen/Qwen3.5-0.8B --batch-size 8
 
 # 3. Compare base vs abliterated responses for a specific trial
 python scripts/test_trial.py --model Qwen/Qwen3.5-0.8B --checkpoint checkpoints_100t --trial 46

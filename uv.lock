@@ -2246,8 +2246,8 @@ wheels = [
 ]
 
 [[package]]
-name = "prometheus-llm"
-version = "1.0.0"
+name = "abliterix"
+version = "1.0.1"
 source = { editable = "." }
 dependencies = [
     { name = "accelerate" },
@@ -2299,7 +2299,7 @@ requires-dist = [
     { name = "numpy", marker = "extra == 'research'", specifier = "~=2.2" },
     { name = "optuna", specifier = "~=4.5" },
     { name = "pacmap", marker = "extra == 'research'", specifier = "~=0.8" },
-    { name = "peft", specifier = "~=0.14" },
+    { name = "peft", specifier = "~=0.18" },
     { name = "psutil", specifier = "~=7.1" },
     { name = "pydantic-settings", specifier = "~=2.10" },
     { name = "questionary", specifier = "~=2.1" },

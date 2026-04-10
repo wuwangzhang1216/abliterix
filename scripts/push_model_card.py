@@ -13,7 +13,7 @@ Usage:
         --repo wangzhang/Devstral-Small-2-24B-Instruct-abliterated \
         --base-model mistralai/Devstral-Small-2-24B-Instruct-2512 \
         --card-file cards/devstral.md \
-        --tags prometheus uncensored abliterated mistral code \
+        --tags abliterix uncensored abliterated mistral code \
         --license apache-2.0 \
         --language en zh
 

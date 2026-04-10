@@ -1,4 +1,4 @@
-"""Tests for prometheus.vectors — steering vector computation.
+"""Tests for abliterix.vectors — steering vector computation.
 
 All tests use small synthetic tensors (no GPU, no model).
 """

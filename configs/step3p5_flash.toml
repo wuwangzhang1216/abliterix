@@ -1,0 +1,104 @@
+# Step-3.5-Flash (196B total / ~11B active) — Sparse MoE abliteration config
+#
+# Architecture: 45-layer MoE transformer + 3 MTP head layers (auto-filtered)
+#   - Layers 0-2: dense MLP (11264 intermediate)
+#   - Layers 3-44: MoE (288 experts, top-8, 1280 intermediate) + shared expert
+#   - Hybrid attention: full (every 4th layer) + sliding window 512
+#   - Head-wise sigmoid gating (g_proj) per attention layer
+#   - Zero-centered RMSNorm, QK normalization
+#
+# Key constraints:
+#   - Flash Attention NOT supported (_supports_flash_attn = False) — use SDPA
+#   - trust_remote_code required (custom Step3p5ForCausalLM)
+#   - MoE uses packed MoELinear format (288, out, in), not per-expert modules
+#   - Shared expert is "share_expert" (not "shared_expert")
+#   - MTP-3 heads are auto-truncated from transformer_layers
+#
+# Hardware: 6x RTX Pro 6000 96GB (576GB total, bf16 weights ~392GB, ~184GB for KV cache)
+# Phase 1 (HF): hidden state extraction + vector computation
+# Phase 2 (vLLM TP=6): all generation with tensor parallelism
+
+[model]
+model_id = "stepfun-ai/Step-3.5-Flash"
+dtype_fallback_order = ["bfloat16"]
+quant_method = "none"
+use_torch_compile = false
+device_map = "auto"
+trust_remote_code = true
+# Note: attn_implementation is NOT set — Step-3.5's custom code manages its
+# own attention dispatch (SDPA/FlexAttention).  Setting it causes an error
+# with trust_remote_code models on transformers < 5.0.
+# vLLM only supports MTP-1; Step-3.5 has MTP-3 — downgrade to avoid errors
+hf_overrides = {num_nextn_predict_layers = 1}
+# Phase 1: HF pipeline parallelism (6x RTX Pro 6000 96GB)
+max_memory = {0 = "92GiB", 1 = "92GiB", 2 = "92GiB", 3 = "92GiB", 4 = "92GiB", 5 = "92GiB"}
+# Phase 2: vLLM tensor parallelism
+backend = "vllm"
+tensor_parallel_size = 6
+gpu_memory_utilization = 0.92
+# EP for 288 experts — distribute across GPUs
+enable_expert_parallel = true
+enable_chunked_prefill = true
+enforce_eager = false
+
+[inference]
+batch_size = 0
+# 11B active params per token — generous batching feasible
+max_batch_size = 8
+max_gen_tokens = 50
+
+[steering]
+# Direct weight editing: LoRA cannot target packed MoELinear (3D tensors).
+# Direct mode modifies base weights in-place via orthogonal projection.
+steering_mode = "direct"
+vector_method = "mean"
+orthogonal_projection = true
+# Auto-select effective layers (mixed full/sliding attention benefits from this)
+discriminative_layer_selection = true
+decay_kernel = "cosine"
+weight_normalization = "none"
+# Direct editing is potent — moderate range
+strength_range = [0.5, 2.0]
+
+[optimization]
+num_trials = 60
+num_warmup_trials = 20
+checkpoint_dir = "checkpoints_step3p5_flash"
+
+[kl]
+scale = 1.0
+token_count = 3
+target = 0.02
+prune_threshold = 8.0
+
+[detection]
+llm_judge = true
+llm_judge_batch_size = 10
+llm_judge_concurrency = 35
+
+[display]
+print_responses = false
+print_residual_geometry = false
+plot_residuals = false
+
+non_interactive = true
+
+[benign_prompts]
+dataset = "datasets/good_500"
+split = "train[:400]"
+column = "prompt"
+
+[target_prompts]
+dataset = "datasets/harmful_500"
+split = "train[:400]"
+column = "prompt"
+
+[benign_eval_prompts]
+dataset = "datasets/good_500"
+split = "train[400:]"
+column = "prompt"
+
+[target_eval_prompts]
+dataset = "datasets/harmful_500"
+split = "train[400:]"
+column = "prompt"
