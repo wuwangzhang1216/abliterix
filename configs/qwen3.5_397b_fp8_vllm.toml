@@ -32,7 +32,7 @@ batch_size = 0
 # MoE active params = 17B — larger batch feasible since only 10 routed experts
 # are active per token. 8 is a good balance for 6× H100.
 max_batch_size = 8
-max_gen_tokens = 50
+max_gen_tokens = 150
 
 [steering]
 vector_method = "mean"

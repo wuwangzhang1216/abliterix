@@ -20,7 +20,7 @@ device_map = "auto"
 [inference]
 batch_size = 0
 max_batch_size = 8
-max_gen_tokens = 50
+max_gen_tokens = 150
 
 [steering]
 # COSMIC direction selection — critical for MoE where refusal may be

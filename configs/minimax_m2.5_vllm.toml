@@ -42,7 +42,7 @@ batch_size = 0
 # MoE active params = 10B — much smaller than total 229B. GPU can handle
 # larger batches for continuous batching throughput.
 max_batch_size = 16
-max_gen_tokens = 50
+max_gen_tokens = 150
 
 [steering]
 vector_method = "mean"

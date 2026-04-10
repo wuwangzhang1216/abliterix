@@ -62,8 +62,13 @@ checkpoints*/
 # Experiment outputs (generated at runtime)
 experiments*/
 
-# Benchmark results (generated at runtime)
-/benchmarks/
+# HonestAbliterationBench: track the spec, the contributing guide, the
+# result JSONs that build the leaderboard, and the auto-generated
+# leaderboard.json mirror. Ignore the large per-prompt raw outputs and
+# any local scratch under benchmarks/.
+/benchmarks/results/*.outputs.jsonl
+/benchmarks/space/
+/benchmarks/_scratch/
 
 # One-off scratch scripts
 /scratch/

@@ -15,7 +15,7 @@ max_memory = {0 = "134GiB", 1 = "134GiB", 2 = "134GiB", 3 = "134GiB", 4 = "134Gi
 [inference]
 batch_size = 0
 max_batch_size = 4
-max_gen_tokens = 50
+max_gen_tokens = 150
 
 [steering]
 vector_method = "mean"

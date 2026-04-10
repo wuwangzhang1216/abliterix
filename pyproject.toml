@@ -95,3 +95,13 @@ invalid-argument-type = "ignore"
 invalid-assignment = "ignore"
 invalid-return-type = "ignore"
 unresolved-attribute = "ignore"
+# Many `# ty:ignore[unresolved-import]` markers shield optional GPU/research
+# extras from import errors; on a fresh CI install those ignores are reported
+# as unused even though they are load-bearing in production environments.
+unused-ignore-comment = "ignore"
+# Pydantic-settings BaseSettings fields are populated via env/CLI/TOML at
+# runtime; ty cannot see that and reports `missing-argument` on direct calls
+# in helper code. The same dynamic attribute population also confuses
+# `not-subscriptable` checks against engine objects.
+missing-argument = "ignore"
+not-subscriptable = "ignore"

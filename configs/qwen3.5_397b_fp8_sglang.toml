@@ -30,7 +30,7 @@ kv_cache_dtype = "fp8_e4m3"
 [inference]
 batch_size = 0
 max_batch_size = 8
-max_gen_tokens = 50
+max_gen_tokens = 150
 
 [steering]
 vector_method = "mean"

@@ -642,18 +642,35 @@ def _apply_ega_steering(
         n_experts = fused.shape[0]
         vf = v.to(torch.float32)
 
+        # Layout disambiguation: standard MoE stores fused down_proj as
+        # (experts, out=hidden, in=intermediate); gpt-oss stores it
+        # transposed as (experts, in=intermediate, out=hidden) and uses
+        # `out = act @ W` directly. Shape-based detection is ambiguous when
+        # hidden == intermediate (e.g. gpt-oss-20b: both 2880), so we honour
+        # the engine's `_fused_down_proj_transposed` flag set at load time.
+        transposed = getattr(engine, "_fused_down_proj_transposed", False)
+
         for eid in range(n_experts):
             W = fused.data[eid].to(torch.float32)
-            out_f, in_f = W.shape
+            d0, d1 = W.shape
 
-            if vf.shape[0] == out_f:
-                proj = vf @ W
-                W_new = W - strength * vf.unsqueeze(1) * proj.unsqueeze(0)
-            elif vf.shape[0] == in_f:
+            if transposed:
+                # W shape (in_intermediate, out_hidden) — vf lives in out_hidden.
+                # Remove output direction: W_new = W (I - vv^T)
+                if vf.shape[0] != d1:
+                    continue
                 proj = W @ vf
                 W_new = W - strength * proj.unsqueeze(1) * vf.unsqueeze(0)
             else:
-                continue
+                out_f, in_f = d0, d1
+                if vf.shape[0] == out_f:
+                    proj = vf @ W
+                    W_new = W - strength * vf.unsqueeze(1) * proj.unsqueeze(0)
+                elif vf.shape[0] == in_f:
+                    proj = W @ vf
+                    W_new = W - strength * proj.unsqueeze(1) * vf.unsqueeze(0)
+                else:
+                    continue
 
             if norm_preserve:
                 orig_norms = torch.linalg.vector_norm(W, dim=1, keepdim=True)

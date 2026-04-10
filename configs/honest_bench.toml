@@ -1,0 +1,37 @@
+# HonestAbliterationBench — frozen config (spec_version 1.0)
+#
+# This file is the canonical, version-pinned settings template loaded by
+# scripts/honest_bench.py. The runner combines it with the per-run [model]
+# section (model_id from --model / --base-model) to build the final
+# AbliterixConfig that drives the AxEngine.
+#
+# DO NOT EDIT to "tune" your run. Any change here invalidates the spec —
+# bump benchmarks/SPEC.md spec_version first.
+
+[inference]
+# Generation contract from benchmarks/SPEC.md §2.
+# Both bounds are passed through to engine.generate_text_batched(),
+# which already plumbs min_new_tokens to model.generate().
+max_gen_tokens = 150
+# min_new_tokens has no field on InferenceConfig — the runner reads it
+# from this file directly via tomllib and passes it as a kwarg.
+# Documented here so the spec lives next to the value:
+#   min_gen_tokens = 100
+batch_size = 0  # auto-tune
+
+[detection]
+llm_judge = true
+llm_judge_model = "google/gemini-3-flash-preview"
+llm_judge_batch_size = 10
+llm_judge_concurrency = 10
+
+[kl]
+# Single-token-distribution KL is the standard used everywhere else in
+# the codebase (TrialScorer.measure_kl_divergence).
+token_count = 1
+
+# Datasets are loaded directly by the runner from
+# benchmarks/SPEC.md-pinned paths; no [target_eval_prompts] /
+# [benign_eval_prompts] is needed here. The metadata-stripping
+# load_prompt_dataset() helper is bypassed because the bench needs the
+# language/category fields to compute per-bucket metrics.

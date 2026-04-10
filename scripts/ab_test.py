@@ -32,7 +32,7 @@ console = Console()
 
 N_TRAIN = 200
 N_EVAL = 100
-MAX_GEN_TOKENS = 50
+MAX_GEN_TOKENS = 150
 BATCH_SIZE = 8
 STRENGTHS = [0.5, 0.8, 1.0, 1.2, 1.5, 2.0]
 

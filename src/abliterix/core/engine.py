@@ -237,7 +237,11 @@ class SteeringEngine:
         # Auto-detect native FP8 models: if the model's config.json already
         # contains quantization_config with quant_method="fp8", treat it as FP8
         # even if the user didn't explicitly set quant_method in our config.
+        # Also auto-detect MXFP4 (gpt-oss) so we can force dequant — abliteration
+        # requires direct nn.Parameter access to fused expert weights, which the
+        # native MXFP4 path (Mxfp4GptOssExperts) does not expose.
         self._is_native_fp8 = False
+        self._is_native_mxfp4 = False
         try:
             from transformers import AutoConfig as _AC
 
@@ -258,8 +262,27 @@ class SteeringEngine:
                             "  [dim]Auto-detected native FP8 model "
                             "(quantization_config in config.json)[/]"
                         )
+                elif _qm.get("quant_method") == "mxfp4":
+                    self._is_native_mxfp4 = True
+                    print(
+                        "  [dim]Auto-detected native MXFP4 model — "
+                        "will force dequantize=True so fused expert weights "
+                        "are exposed as standard nn.Parameter[/]"
+                    )
+
+            # Detect transposed fused-expert layout. Most MoE models store
+            # the fused down_proj tensor as (experts, hidden_out, intermediate_in).
+            # gpt-oss is the exception: GptOssExperts.down_proj has shape
+            # (experts, intermediate_in, hidden_out) and the forward path uses
+            # `out = act @ W` (no transpose). When in==out (gpt-oss has
+            # hidden==intermediate==2880) the EGA axis-detection-by-shape
+            # heuristic falls back to the wrong branch — we need an explicit
+            # marker. See _apply_ega_steering in steering.py.
+            _text_cfg = getattr(_auto_cfg, "text_config", _auto_cfg)
+            _model_type = getattr(_text_cfg, "model_type", "")
+            self._fused_down_proj_transposed = _model_type in {"gpt_oss"}
         except Exception:
-            pass
+            self._fused_down_proj_transposed = False
 
         is_fp8 = config.model.quant_method == QuantMode.FP8 or self._is_native_fp8
 
@@ -280,6 +303,24 @@ class SteeringEngine:
                 extra: dict[str, Any] = {}
                 if qconfig is not None:
                     extra["quantization_config"] = qconfig
+
+                # MXFP4 (gpt-oss): force dequant to BF16 so abliteration can
+                # access fused expert weights as a standard 3-D nn.Parameter.
+                # Without this override, transformers wraps the experts in
+                # Mxfp4GptOssExperts whose `down_proj` is a packed triton
+                # tensor that _locate_fused_weights cannot edit.
+                if self._is_native_mxfp4 and qconfig is None:
+                    try:
+                        from transformers import Mxfp4Config
+
+                        extra["quantization_config"] = Mxfp4Config(dequantize=True)
+                    except ImportError:
+                        print(
+                            "  [yellow]transformers lacks Mxfp4Config — "
+                            "MXFP4 dequant cannot be forced; ensure "
+                            "triton/kernels are NOT installed so the "
+                            "quantizer falls back to bf16[/]"
+                        )
 
                 if config.model.attn_implementation is not None:
                     extra["attn_implementation"] = config.model.attn_implementation
@@ -1139,12 +1180,15 @@ class SteeringEngine:
         messages: list[ChatMessage],
         skip_special_tokens: bool = False,
         max_new_tokens: int | None = None,
+        min_new_tokens: int | None = None,
     ) -> list[str]:
         """Generate responses for a batch of chat messages."""
-        inputs, outputs = self._generate(
-            messages,
-            max_new_tokens=max_new_tokens or self.config.inference.max_gen_tokens,
-        )
+        gen_kwargs: dict[str, Any] = {
+            "max_new_tokens": max_new_tokens or self.config.inference.max_gen_tokens,
+        }
+        if min_new_tokens is not None:
+            gen_kwargs["min_new_tokens"] = min_new_tokens
+        inputs, outputs = self._generate(messages, **gen_kwargs)
         return self.tokenizer.batch_decode(
             outputs[:, cast(Tensor, inputs["input_ids"]).shape[1] :],
             skip_special_tokens=skip_special_tokens,
@@ -1155,6 +1199,7 @@ class SteeringEngine:
         messages: list[ChatMessage],
         skip_special_tokens: bool = False,
         max_new_tokens: int | None = None,
+        min_new_tokens: int | None = None,
     ) -> list[str]:
         """Batched wrapper around :meth:`generate_text`."""
         out: list[str] = []
@@ -1164,6 +1209,7 @@ class SteeringEngine:
                     batch,
                     skip_special_tokens=skip_special_tokens,
                     max_new_tokens=max_new_tokens,
+                    min_new_tokens=min_new_tokens,
                 )
             )
         return out

@@ -1,7 +1,39 @@
-# GPT-OSS-20B (MoE) steering config
+non_interactive = true
+
+# GPT-OSS-20B (MoE) steering config — RTX 6000 Ada 48GB
 # Architecture: 24 layers, 32 routed experts, top-4, no shared experts
-# hidden=2880, intermediate=2880, fused expert weights
-# Ships as MXFP4 (~10GB), dequantized to BF16 (~39GB) — fits A40 48GB
+# hidden=2880, intermediate=2880, fused expert weights (mlp.experts.down_proj)
+# Ships as MXFP4 (~13GB) — abliteration must dequant to BF16 (~40GB).
+#
+# GPU notes (RTX 6000 Ada, sm_89):
+#   - vLLM FA3 unavailable on Ada; falls back to FA2 automatically.
+#   - BF16 model + KV cache + hidden states cache must fit in 48GB.
+#   - max_memory pinned to 44GiB to leave headroom for activations/KV.
+#   - Keep max_batch_size small; bottleneck is activation memory, not flops.
+#
+# MXFP4 handling (auto, do not override):
+#   - engine.py auto-detects native MXFP4 and forces
+#     `Mxfp4Config(dequantize=True)` so GptOssExperts.down_proj is exposed
+#     as a standard 3-D nn.Parameter (32, 2880, 2880). Without dequant,
+#     the experts are wrapped in Mxfp4GptOssExperts whose weights are
+#     packed triton tensors that abliterix cannot edit.
+#   - DO NOT install `kernels-community/gpt-oss-triton-kernels`; it is
+#     unnecessary for the dequant path and only adds load time.
+#   - Keep `quant_method = "none"` here — engine sees the model's own
+#     quantization_config and forces the right Mxfp4Config.
+#
+# Steering strategy:
+#   - steering_mode = "direct" → orthogonal projection on base weights
+#     AND auto-triggers Expert-Granular Abliteration (EGA) on all 32
+#     experts' fused down_proj (steering.py:244). Critical for MoE because
+#     the refusal signal is distributed across experts, not concentrated.
+#   - EGA axis fix: gpt-oss stores fused down_proj as
+#     (experts, intermediate_in, hidden_out) — transposed vs standard MoE.
+#     engine.py sets `_fused_down_proj_transposed=True` for gpt_oss so
+#     _apply_ega_steering picks the correct projection branch (the
+#     dimension equality 2880==2880 made shape-based detection ambiguous).
+#   - weight_normalization = "full" → preserve row norms after projection
+#     (matches Gemma 4 best practice for direct mode).
 
 [model]
 model_id = "openai/gpt-oss-20b"
@@ -10,19 +42,20 @@ quant_method = "none"
 use_torch_compile = false
 device_map = "auto"
 trust_remote_code = true
-max_memory = {0 = "46GiB"}
+max_memory = {0 = "44GiB"}
 
 [inference]
 batch_size = 0          # auto-tune
-max_batch_size = 4      # conservative for 48GB A40 with BF16
-max_gen_tokens = 50
+max_batch_size = 2      # conservative — BF16 20B leaves only ~8GB headroom on 48GB
+max_gen_tokens = 150
 
 [steering]
 vector_method = "mean"
+steering_mode = "direct"        # in-place weight edit + EGA on fused experts
 decay_kernel = "linear"
 orthogonal_projection = true
-weight_normalization = "none"
-# MoE: wider strength range (small intermediate dims)
+weight_normalization = "full"   # norm-preserving projection (Gemma 4 lesson)
+# MoE: wider strength range (small intermediate=2880)
 strength_range = [1.0, 10.0]
 
 [optimization]

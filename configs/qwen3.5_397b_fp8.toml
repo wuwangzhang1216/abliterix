@@ -19,7 +19,7 @@ max_memory = {0 = "76GiB", 1 = "76GiB", 2 = "76GiB", 3 = "76GiB", 4 = "76GiB", 5
 batch_size = 0
 # MoE: only 17B active params per token — can handle batch_size=4 on 6× H100
 max_batch_size = 4
-max_gen_tokens = 50
+max_gen_tokens = 150
 
 [steering]
 vector_method = "mean"

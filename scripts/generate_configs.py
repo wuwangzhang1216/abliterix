@@ -120,7 +120,7 @@ def _render_toml(spec: ModelSpec) -> str:
         "[inference]",
         "batch_size = 0",
         f"max_batch_size = {t['max_batch_size']}",
-        "max_gen_tokens = 50",
+        "max_gen_tokens = 150",
         "",
         "[steering]",
         'vector_method = "mean"',

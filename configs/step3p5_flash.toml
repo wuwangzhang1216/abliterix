@@ -45,7 +45,7 @@ enforce_eager = false
 batch_size = 0
 # 11B active params per token — generous batching feasible
 max_batch_size = 8
-max_gen_tokens = 50
+max_gen_tokens = 150
 
 [steering]
 # Direct weight editing: LoRA cannot target packed MoELinear (3D tensors).
