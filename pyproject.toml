@@ -54,10 +54,9 @@ vllm = [
     "vllm>=0.8",
     "speculators>=0.1.9",
 ]
-sglang = [
-    "sglang[all]>=0.5.10",
-    "speculators>=0.1.9",
-]
+# sglang extra removed from pyproject.toml due to dependency conflict
+# (sglang pins imageio==2.36.0, research extra needs imageio>=2.36).
+# Install manually: pip install "sglang[all]>=0.5.10" speculators>=0.1.9
 
 [dependency-groups]
 dev = [
