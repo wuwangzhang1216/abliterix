@@ -499,18 +499,33 @@ def run():
     if _vllm_hs_ok:
         print()
         print("[bold]Fast hidden state extraction (vLLM native TP)[/]")
-        print("* Extracting residuals for benign prompts...")
-        _precomputed_benign_states = extract_hidden_states_vllm(
-            config,
-            benign_msgs,
-        )
-        print("* Extracting residuals for target prompts...")
-        _precomputed_target_states = extract_hidden_states_vllm(
-            config,
-            target_msgs,
-        )
-        print()
-    elif config.model.backend in ("vllm", "sglang") and _speculators_available():
+        try:
+            print("* Extracting residuals for benign prompts...")
+            _precomputed_benign_states = extract_hidden_states_vllm(
+                config,
+                benign_msgs,
+            )
+            print("* Extracting residuals for target prompts...")
+            _precomputed_target_states = extract_hidden_states_vllm(
+                config,
+                target_msgs,
+            )
+            print()
+        except Exception as exc:
+            print(
+                f"\n[yellow bold]vLLM extract_hidden_states failed: {exc}[/]\n"
+                "Falling back to next available extraction method..."
+            )
+            _precomputed_benign_states = None
+            _precomputed_target_states = None
+            flush_memory()
+            _vllm_hs_ok = False
+
+    if (
+        _precomputed_benign_states is None
+        and config.model.backend in ("vllm", "sglang")
+        and _speculators_available()
+    ):
         from .core.speculators_backend import extract_hidden_states_speculators
 
         print()
@@ -526,7 +541,7 @@ def run():
             target_msgs,
         )
         print()
-    elif config.model.backend in ("vllm", "sglang"):
+    elif _precomputed_benign_states is None and config.model.backend in ("vllm", "sglang"):
         print()
         print(
             "[yellow bold]WARNING: No fast hidden state extraction available![/]\n"
@@ -644,20 +659,39 @@ def run():
             target_states = engine.extract_hidden_states_batched(target_msgs)
 
         print(f"* Vector method: [bold]{config.steering.vector_method.value}[/]")
-        vectors = compute_steering_vectors(
-            benign_states,
-            target_states,
-            config.steering.vector_method,
-            config.steering.orthogonal_projection,
-            winsorize=config.steering.winsorize_vectors,
-            winsorize_quantile=config.steering.winsorize_quantile,
-            projected_abliteration=config.steering.projected_abliteration,
-            ot_components=config.steering.ot_components,
-            n_directions=config.steering.n_directions,
-            sra_base_method=config.steering.sra_base_method,
-            sra_n_atoms=config.steering.sra_n_atoms,
-            sra_ridge_alpha=config.steering.sra_ridge_alpha,
-        )
+
+        if config.iterative.enabled:
+            from .iterative import iterative_abliterate
+
+            vectors, iter_stats = iterative_abliterate(
+                engine,
+                benign_msgs,
+                target_msgs,
+                config,
+                benign_states=benign_states,
+                target_states=target_states,
+            )
+            # Model restored inside iterative_abliterate.
+            # Re-extract clean states for discriminative layer selection / analysis.
+            if config.steering.discriminative_layer_selection:
+                print("* Re-extracting clean residuals for discriminative layer selection...")
+                benign_states = engine.extract_hidden_states_batched(benign_msgs)
+                target_states = engine.extract_hidden_states_batched(target_msgs)
+        else:
+            vectors = compute_steering_vectors(
+                benign_states,
+                target_states,
+                config.steering.vector_method,
+                config.steering.orthogonal_projection,
+                winsorize=config.steering.winsorize_vectors,
+                winsorize_quantile=config.steering.winsorize_quantile,
+                projected_abliteration=config.steering.projected_abliteration,
+                ot_components=config.steering.ot_components,
+                n_directions=config.steering.n_directions,
+                sra_base_method=config.steering.sra_base_method,
+                sra_n_atoms=config.steering.sra_n_atoms,
+                sra_ridge_alpha=config.steering.sra_ridge_alpha,
+            )
 
         analyzer = ResidualAnalyzer(config, engine, benign_states, target_states)
 

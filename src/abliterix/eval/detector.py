@@ -349,14 +349,13 @@ class RefusalDetector:
 
         Only inspects the first few words, so false negatives are expected —
         this is used to bypass the more expensive LLM judge for obvious cases.
+
+        NOTE: Does NOT run ``_is_degenerate`` as a shortcircuit.  Markdown
+        formatting (``**bold**``, ``---`` dividers) triggered false positives
+        on compliant responses, inflating refusal counts.  Degeneracy checks
+        now run inside the LLM judge pipeline only.
         """
         if not response.strip():
-            return True
-
-        # Degenerate output is an "obvious" refusal too — short-circuit
-        # before the LLM judge is called so that looped / garbled responses
-        # never reach it (and never get mis-labelled as compliance).
-        if self._is_degenerate(response):
             return True
 
         norm = self._normalise(response)

@@ -331,3 +331,116 @@ def compute_steering_vectors(
         vectors = F.normalize(vectors, p=2, dim=1)
 
     return vectors
+
+
+# ---------------------------------------------------------------------------
+# Iterative abliteration helpers
+# ---------------------------------------------------------------------------
+
+
+def orthogonalize_against(
+    new_dirs: Tensor,
+    previous_dirs: list[Tensor],
+    norm_threshold: float = 0.1,
+) -> Tensor:
+    """Gram-Schmidt orthogonalise *new_dirs* against all *previous_dirs* per layer.
+
+    Directions whose residual L2 norm (relative to the first direction ever
+    extracted) falls below *norm_threshold* are zeroed out — they carry no
+    new information.
+
+    Parameters
+    ----------
+    new_dirs : Tensor
+        Shape ``(k, layers+1, hidden_dim)`` — freshly extracted directions.
+    previous_dirs : list[Tensor]
+        Each element has shape ``(k_i, layers+1, hidden_dim)``.
+    norm_threshold : float
+        Minimum relative norm to keep a direction.
+
+    Returns
+    -------
+    Tensor
+        Orthogonalised directions, same shape as *new_dirs*.  Some slices may
+        be all-zeros if they fell below the threshold.
+    """
+    if not previous_dirs:
+        return new_dirs
+
+    # Stack all previous directions: (N_prev, layers+1, hidden_dim)
+    prev = torch.cat(previous_dirs, dim=0)
+    n_layers = new_dirs.shape[1]
+    result = new_dirs.clone().float()
+
+    for layer_idx in range(n_layers):
+        P = prev[:, layer_idx, :].float()  # (N_prev, d)
+        for k in range(result.shape[0]):
+            v = result[k, layer_idx, :]  # (d,)
+            # Project out each previous direction.
+            for j in range(P.shape[0]):
+                p = P[j]
+                p_norm_sq = torch.dot(p, p)
+                if p_norm_sq > 1e-12:
+                    v = v - (torch.dot(v, p) / p_norm_sq) * p
+            result[k, layer_idx, :] = v
+
+    # Check norms and zero out weak directions.
+    for k in range(result.shape[0]):
+        layer_norms = result[k].norm(p=2, dim=1)  # (layers+1,)
+        if layer_norms.mean().item() < norm_threshold:
+            result[k] = 0.0
+        else:
+            result[k] = F.normalize(result[k], p=2, dim=1)
+
+    return result.to(new_dirs.dtype)
+
+
+def build_subspace_basis(directions: list[Tensor]) -> Tensor:
+    """Combine directions from multiple iterations into an orthonormal basis.
+
+    Uses per-layer QR decomposition to produce a minimal set of orthogonal
+    directions spanning the full refusal subspace discovered across all
+    iterations.
+
+    Parameters
+    ----------
+    directions : list[Tensor]
+        Each element has shape ``(k_i, layers+1, hidden_dim)``.
+
+    Returns
+    -------
+    Tensor
+        Orthonormal basis, shape ``(rank, layers+1, hidden_dim)``.
+    """
+    stacked = torch.cat(directions, dim=0).float()  # (N, layers+1, d)
+    n_dirs, n_layers, hidden_dim = stacked.shape
+
+    # Remove all-zero directions.
+    active_mask = stacked.view(n_dirs, -1).norm(p=2, dim=1) > 1e-8
+    stacked = stacked[active_mask]
+    if stacked.shape[0] == 0:
+        return stacked
+
+    # Per-layer QR to find the rank of the refusal subspace.
+    per_layer_basis = []
+    max_rank = 0
+    for layer_idx in range(n_layers):
+        V = stacked[:, layer_idx, :].T  # (d, N)
+        Q, R = torch.linalg.qr(V)
+        # Keep columns with non-negligible R diagonal.
+        diag = torch.abs(torch.diag(R))
+        rank = int((diag > 1e-6).sum().item())
+        max_rank = max(max_rank, rank)
+        per_layer_basis.append(Q[:, :rank])  # (d, rank_l)
+
+    # Pad to uniform rank and assemble.
+    result = torch.zeros(max_rank, n_layers, hidden_dim, dtype=stacked.dtype, device=stacked.device)
+    for layer_idx, Q in enumerate(per_layer_basis):
+        r = Q.shape[1]
+        result[:r, layer_idx, :] = Q[:, :r].T  # (r, d)
+
+    # Re-normalise each direction.
+    norms = result.norm(p=2, dim=2, keepdim=True).clamp(min=1e-8)
+    result = result / norms
+
+    return result.to(directions[0].dtype)

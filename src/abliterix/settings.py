@@ -587,6 +587,59 @@ class ExpertConfig(BaseModel):
     )
 
 
+class IterativeConfig(BaseModel):
+    """Settings for iterative (multi-pass) abliteration against hardened models.
+
+    DeepRefusal-style defences distribute refusal across redundant pathways.
+    Iterative abliteration peels them away one pass at a time: extract
+    directions, project them out, re-extract from the modified model, repeat
+    until the residual refusal signal drops below a convergence threshold.
+    """
+
+    enabled: bool = Field(
+        default=False,
+        description="Enable iterative abliteration for hardened models (e.g. DeepRefusal).",
+    )
+
+    max_iterations: int = Field(
+        default=5,
+        description="Maximum number of extract-ablate cycles.",
+    )
+
+    convergence_norm_threshold: float = Field(
+        default=0.1,
+        description=(
+            "Stop iterating when the newly extracted refusal direction has "
+            "L2 norm below this fraction of the initial direction norm."
+        ),
+    )
+
+    convergence_cosine_threshold: float = Field(
+        default=0.95,
+        description=(
+            "Stop iterating when the new direction is nearly parallel to "
+            "a previously extracted direction (cosine similarity above this)."
+        ),
+    )
+
+    per_iteration_directions: int = Field(
+        default=3,
+        description=(
+            "Number of directions to extract per iteration (via PCA/SVD).  "
+            "Higher values catch more of the refusal cone per pass."
+        ),
+    )
+
+    accumulation_method: str = Field(
+        default="subspace",
+        description=(
+            "How to combine directions across iterations.  "
+            "'subspace' orthogonalises all directions into a minimal basis via QR.  "
+            "'stack' keeps them as-is (may contain near-redundant directions)."
+        ),
+    )
+
+
 class DisplayConfig(BaseModel):
     """Flags and paths that govern console output and visualisation."""
 
@@ -679,6 +732,11 @@ class AbliterixConfig(BaseSettings):
     experts: ExpertConfig = Field(
         default_factory=ExpertConfig,
         description="MoE safety-expert steering bounds.",
+    )
+
+    iterative: IterativeConfig = Field(
+        default_factory=IterativeConfig,
+        description="Iterative abliteration settings for hardened models.",
     )
 
     display: DisplayConfig = Field(

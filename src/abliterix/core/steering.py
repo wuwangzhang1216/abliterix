@@ -76,13 +76,25 @@ def _detect_discriminative_layers(
     """
     if benign_states is None or target_states is None:
         # Fall back to all layers if residuals are unavailable.
-        return set(range(steering_vectors.shape[0] - 1))
+        n_layers = (
+            steering_vectors.shape[1] - 1
+            if steering_vectors.ndim == 3
+            else steering_vectors.shape[0] - 1
+        )
+        return set(range(n_layers))
+
+    # For multi-direction vectors (n_dirs, layers+1, hidden_dim), use the
+    # primary (first) direction for discriminative layer detection.
+    if steering_vectors.ndim == 3:
+        sv = steering_vectors[0]  # (layers+1, hidden_dim)
+    else:
+        sv = steering_vectors
 
     discriminative: set[int] = set()
-    n_layers = min(steering_vectors.shape[0] - 1, benign_states.shape[1] - 1)
+    n_layers = min(sv.shape[0] - 1, benign_states.shape[1] - 1)
 
     for layer_idx in range(n_layers):
-        v = steering_vectors[layer_idx + 1]  # +1 because index 0 is embedding
+        v = sv[layer_idx + 1]  # +1 because index 0 is embedding
         b = benign_states[:, layer_idx + 1, :].float()
         t = target_states[:, layer_idx + 1, :].float()
 
@@ -214,7 +226,9 @@ def apply_steering(
         )
 
     # --- Resolve the global steering vector (if applicable) ---------------
-    if vector_index is None:
+    # For multi-direction subspace vectors (3D), global vector interpolation
+    # is not applicable — the first dim is directions, not layers.
+    if vector_index is None or steering_vectors.ndim == 3:
         global_vector = None
     else:
         fractional, integral = math.modf(vector_index + 1)
@@ -535,30 +549,47 @@ def _apply_direct_steering(
                     engine._direct_weight_originals[weight] = weight.data.clone()
 
                 device = weight.device
-                if global_vector is None:
-                    v = steering_vectors[layer_idx + 1].to(device)
-                else:
-                    v = global_vector.to(device)
 
                 # Use float32 for projection math to preserve precision
                 # (bf16 loses signal in 2816-dim inner products).
                 W = weight.data.to(torch.float32)
-                vf = v.to(torch.float32)
-
-                # Orthogonal projection: remove the refusal direction from W.
-                # W has shape (out_features, in_features).
-                # v has shape (hidden_dim,) which may match either dimension.
                 out_f, in_f = W.shape
 
-                if vf.shape[0] == out_f:
-                    proj = vf @ W
-                    W_new = W - strength * vf.unsqueeze(1) * proj.unsqueeze(0)
-                elif vf.shape[0] == in_f:
-                    proj = W @ vf
-                    W_new = W - strength * proj.unsqueeze(1) * vf.unsqueeze(0)
+                # Multi-direction subspace projection: when steering_vectors
+                # is 3D (n_dirs, layers+1, hidden_dim), project out the full
+                # refusal subspace in one shot via QR-based projection.
+                if steering_vectors.ndim == 3:
+                    # (n_dirs, hidden_dim)
+                    V_layer = steering_vectors[:, layer_idx + 1, :].to(device).to(torch.float32)
+                    # Build orthonormal basis via QR.
+                    if V_layer.shape[1] == in_f:
+                        Q, _ = torch.linalg.qr(V_layer.T)  # (in_f, rank)
+                        # Subspace projection: W_new = W - strength * W @ Q @ Q^T
+                        W_new = W - strength * (W @ Q) @ Q.T
+                    elif V_layer.shape[1] == out_f:
+                        Q, _ = torch.linalg.qr(V_layer.T)  # (out_f, rank)
+                        W_new = W - strength * Q @ (Q.T @ W)
+                    else:
+                        continue
                 else:
-                    # Dimension mismatch — skip this module.
-                    continue
+                    if global_vector is None:
+                        v = steering_vectors[layer_idx + 1].to(device)
+                    else:
+                        v = global_vector.to(device)
+                    vf = v.to(torch.float32)
+
+                    # Orthogonal projection: remove the refusal direction from W.
+                    # W has shape (out_features, in_features).
+                    # v has shape (hidden_dim,) which may match either dimension.
+                    if vf.shape[0] == out_f:
+                        proj = vf @ W
+                        W_new = W - strength * vf.unsqueeze(1) * proj.unsqueeze(0)
+                    elif vf.shape[0] == in_f:
+                        proj = W @ vf
+                        W_new = W - strength * proj.unsqueeze(1) * vf.unsqueeze(0)
+                    else:
+                        # Dimension mismatch — skip this module.
+                        continue
 
                 # Norm-preserving: restore original row magnitudes.
                 # Critical for double-norm architectures (Gemma 4) where

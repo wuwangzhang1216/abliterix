@@ -1,0 +1,47 @@
+# Base Llama3-8B-Instruct control run
+# Standard abliteration — establishes the achievable floor under LLM judge + harmful_behaviors
+
+[model]
+model_id = "NousResearch/Meta-Llama-3-8B-Instruct"
+dtype_fallback_order = ["bfloat16"]
+quant_method = "none"
+use_torch_compile = false
+device_map = "auto"
+trust_remote_code = false
+
+[inference]
+batch_size = 0
+max_batch_size = 32
+max_gen_tokens = 256
+
+[steering]
+vector_method = "mean"
+n_directions = 1
+steering_mode = "direct"
+projected_abliteration = true
+discriminative_layer_selection = true
+strength_range = [0.8, 2.5]
+decay_kernel = "linear"
+
+[iterative]
+enabled = false
+
+[optimization]
+num_trials = 30
+num_warmup_trials = 10
+checkpoint_dir = "checkpoints_llama3_base_control"
+
+[kl]
+scale = 1.0
+token_count = 1
+target = 0.01
+prune_threshold = 5.0
+
+[detection]
+llm_judge = true
+llm_judge_model = "google/gemini-3.1-flash-lite-preview"
+llm_judge_batch_size = 10
+llm_judge_concurrency = 10
+
+[display]
+print_responses = false

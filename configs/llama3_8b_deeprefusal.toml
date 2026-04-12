@@ -1,0 +1,53 @@
+# Meta-Llama-3-8B-Instruct-DeepRefusal (dense, 32 layers, hidden=4096)
+# DeepRefusal-hardened model — requires iterative abliteration to peel away
+# redundant refusal pathways trained via probabilistic direction ablation.
+
+[model]
+model_id = "skysys00/Meta-Llama-3-8B-Instruct-DeepRefusal"
+dtype_fallback_order = ["bfloat16"]
+quant_method = "none"
+use_torch_compile = false
+device_map = "auto"
+
+[inference]
+batch_size = 0
+max_batch_size = 32
+max_gen_tokens = 256
+
+[detection]
+llm_judge = true
+llm_judge_model = "google/gemini-3.1-flash-lite-preview"
+llm_judge_batch_size = 10
+llm_judge_concurrency = 10
+
+[steering]
+vector_method = "pca"
+n_directions = 3
+steering_mode = "direct"
+projected_abliteration = true
+discriminative_layer_selection = true
+strength_range = [2.0, 10.0]
+decay_kernel = "cosine"
+
+[iterative]
+enabled = true
+max_iterations = 5
+per_iteration_directions = 3
+convergence_norm_threshold = 0.1
+convergence_cosine_threshold = 0.95
+accumulation_method = "subspace"
+
+[optimization]
+num_trials = 100
+num_warmup_trials = 30
+checkpoint_dir = "checkpoints_llama3_8b_deeprefusal"
+
+[kl]
+scale = 1.0
+token_count = 1
+target = 0.01
+prune_threshold = 5.0
+
+[display]
+print_responses = false
+print_residual_geometry = true
