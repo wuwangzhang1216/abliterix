@@ -175,6 +175,27 @@ class ModelConfig(BaseModel):
         ),
     )
 
+    max_model_len: int | None = Field(
+        default=None,
+        description=(
+            "Maximum sequence length (prompt + generation) for vLLM/SGLang.  "
+            "None = use model's default (often 128K-200K).  Setting this lower "
+            "(e.g. 4096) dramatically reduces KV cache reservation per sequence, "
+            "enabling much larger batch sizes for short-prompt workloads like "
+            "abliteration.  Strongly recommended for MoE models."
+        ),
+    )
+
+    max_num_seqs: int | None = Field(
+        default=None,
+        description=(
+            "Maximum concurrent sequences in vLLM's continuous batching.  "
+            "None = vLLM auto.  Set higher (e.g. 256-512) for throughput on "
+            "4x H100 with short prompts; the actual batch size is gated by "
+            "max_model_len and available KV cache."
+        ),
+    )
+
     hf_overrides: Dict[str, Any] | None = Field(
         default=None,
         description=(

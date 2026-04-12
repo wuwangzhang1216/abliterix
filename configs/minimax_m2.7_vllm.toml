@@ -1,0 +1,114 @@
+# MiniMax-M2.7 (MoE) — vLLM dual-engine config for 4× H100 80GB
+# 256 experts (8 routed), 62 layers, hidden=3072, expert_dim=1536
+# FP8: ~220GB weights → TP=4 → ~55GB/GPU, ~25GB headroom for KV cache + LoRA
+#
+# Architecture: HF Phase 1 (hidden states + steering vectors) → vLLM Phase 2
+# (tensor-parallel generation with LoRA hot-swap).
+#
+# TP must divide num_kv_heads=8. Valid: 1, 2, 4, 8. TP=4 is the sweet spot.
+#
+# NOTE: MoE expert routing (n_suppress, router_bias) is NOT supported in
+# vLLM mode — only LoRA weight steering is applied.
+
+[model]
+model_id = "MiniMaxAI/MiniMax-M2.7"
+dtype_fallback_order = ["auto"]
+quant_method = "fp8"
+# MiniMax requires transformers 4.57.x (custom code), which predates the
+# FP8 kernel fixes in 5.2.  On H100 the native FP8 kernels work fine with
+# 4.57 — skip the slow bf16 dequant workaround.
+skip_fp8_dequant = true
+attn_implementation = "flash_attention_2"
+use_torch_compile = false
+device_map = "auto"
+trust_remote_code = true
+# Phase 1 (HF): spread across 4× H100 80GB
+max_memory = {0 = "76GiB", 1 = "76GiB", 2 = "76GiB", 3 = "76GiB"}
+# Phase 2 (vLLM): tensor parallelism across all 4 GPUs
+backend = "vllm"
+tensor_parallel_size = 4
+# H100 80GB: push memory hard. Model weights ~57GB/GPU, leaving 23GB for KV+LoRA.
+gpu_memory_utilization = 0.96
+# EP for MoE expert layers — distributes 256 experts across 4 GPUs (~64 each)
+enable_expert_parallel = true
+enable_chunked_prefill = true
+# CUDA graphs for ~15% throughput boost (stable with vLLM >= 0.8)
+enforce_eager = false
+# FP8 KV cache: 4x KV capacity vs fp16 on H100 with negligible quality loss
+kv_cache_dtype = "fp8_e4m3"
+# CRITICAL: Cap sequence length. Model supports 196K, but abliteration
+# prompts + gen are <2K. Default would reserve 196K KV per sequence, killing
+# batch size. 4096 → ~48x more KV cache → ~48x larger batches.
+max_model_len = 4096
+# Continuous batching: with fp8 KV + 4096 ctx, we can easily fit 256+ seqs.
+# MoE active params = 10B (vs 229B total), so compute is cheap per token.
+max_num_seqs = 256
+
+[inference]
+batch_size = 0
+# Auto-tuner ceiling. With max_num_seqs=256 + fp8 KV, 229B MoE on 4x H100
+# can handle this comfortably for short (100-400 token) generations.
+max_batch_size = 256
+# Refusal detection only needs ~30-50 tokens; cap at 64 to halve gen cost.
+max_gen_tokens = 64
+
+[steering]
+vector_method = "mean"
+decay_kernel = "linear"
+orthogonal_projection = true
+weight_normalization = "none"
+# MoE: wider weight range (consistent with Qwen3.5-122B/397B)
+strength_range = [1.0, 10.0]
+# Q/K/V steering adds 12 search dimensions for near-zero improvement on MoE.
+# Validated on Gemma 4 E4B (21 dims → 9 dims, TPE converges properly).
+disabled_components = ["attn.q_proj", "attn.k_proj", "attn.v_proj"]
+# Focus search: EGA on expert down_proj (wide) + attention output (moderate)
+[steering.component_strength_ranges]
+"mlp.down_proj" = [2.0, 10.0]
+"attn.o_proj" = [1.0, 5.0]
+
+[optimization]
+num_trials = 50
+num_warmup_trials = 10
+checkpoint_dir = "checkpoints_minimax_m27_vllm"
+
+[kl]
+scale = 1.0
+token_count = 3
+target = 0.01
+# Prune over-steered trials early (skip compliance check if KL > threshold).
+# Tighter threshold = faster search, fewer wasted generations.
+prune_threshold = 3.0
+
+[detection]
+llm_judge = true
+llm_judge_model = "google/gemini-3.1-flash-lite-preview"
+llm_judge_batch_size = 10
+llm_judge_concurrency = 10
+
+[display]
+print_responses = false
+print_residual_geometry = false
+plot_residuals = false
+
+non_interactive = true
+
+[benign_prompts]
+dataset = "datasets/good_1000"
+split = "train[:400]"
+column = "prompt"
+
+[target_prompts]
+dataset = "datasets/harmful_1000"
+split = "train[:400]"
+column = "prompt"
+
+[benign_eval_prompts]
+dataset = "datasets/good_1000"
+split = "train[400:500]"
+column = "prompt"
+
+[target_eval_prompts]
+dataset = "datasets/harmful_1000"
+split = "train[400:500]"
+column = "prompt"

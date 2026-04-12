@@ -88,6 +88,10 @@ class SGLangGenerator:
             # Must be explicitly disabled.
             disable_radix_cache=True,
         )
+        if config.model.max_model_len is not None:
+            kwargs["context_length"] = config.model.max_model_len
+        if config.model.max_num_seqs is not None:
+            kwargs["max_running_requests"] = config.model.max_num_seqs
 
         # Model config overrides (e.g. MTP-3 → MTP-1 for Step-3.5-Flash).
         if config.model.hf_overrides:

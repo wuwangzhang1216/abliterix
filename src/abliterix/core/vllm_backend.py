@@ -87,6 +87,10 @@ class VLLMGenerator:
             # NOTE: chunked_prefill is always ON in vLLM V1 (>= 0.8) and
             # cannot be disabled.  We don't pass enable_chunked_prefill.
         )
+        if config.model.max_model_len is not None:
+            kwargs["max_model_len"] = config.model.max_model_len
+        if config.model.max_num_seqs is not None:
+            kwargs["max_num_seqs"] = config.model.max_num_seqs
 
         # Model config overrides (e.g. MTP-3 → MTP-1 for Step-3.5-Flash).
         if config.model.hf_overrides:

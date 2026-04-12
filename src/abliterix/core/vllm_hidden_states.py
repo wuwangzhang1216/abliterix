@@ -41,6 +41,7 @@ _SUPPORTED_MODEL_TYPES = {
     "deepseek_v3",
     "kimi_k2",
     "kimi_k25",
+    "minimax_m2",
     # "step3p5" — disabled: vLLM's extract_hidden_states speculative API
     # is not yet compatible with Step-3.5-Flash's custom architecture.
     # Falls back to HF pipeline parallelism for Phase 1.
