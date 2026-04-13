@@ -117,22 +117,18 @@ with apply_pca_ot_hooks(model, transforms, layer_indices=[15], norm_preserving=T
 ## Architecture Support
 
 ### Supported Models
-- Llama (all versions)
-- Mistral
-- Qwen
-- Gemma
-- Phi
-- GPT-2
-- BERT-style encoders
+Works with any HuggingFace transformer model. The hook-based approach automatically detects common layer structures.
 
-### Target Modules
-Different architectures require different target modules for weight baking:
+### Target Modules for Weight Baking
+When using weight baking, you need to specify which module to modify. Common choices:
 
 | Architecture | Target Module |
 |--------------|---------------|
 | Llama, Mistral, Qwen | `mlp.down_proj` |
 | GPT-2 | `mlp.c_proj` |
 | BERT | `output` |
+
+For other architectures, inspect the model structure to find the appropriate module name (typically the final projection in the MLP or attention block).
 
 ## API Reference
 

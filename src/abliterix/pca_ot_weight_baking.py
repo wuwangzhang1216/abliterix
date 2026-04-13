@@ -191,7 +191,7 @@ def bake_pca_ot_into_model(
     if layers is None:
         raise ValueError(
             "Could not find transformer layers in model. "
-            "Supported architectures: Llama, Mistral, Qwen, GPT-2, BERT."
+            "Tried common paths: model.layers, transformer.h, transformer.layers, encoder.layer."
         )
 
     # Build transform lookup

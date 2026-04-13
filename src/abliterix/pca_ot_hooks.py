@@ -93,8 +93,8 @@ class PCAOTHookManager:
 
         raise ValueError(
             "Could not find transformer layers in model. "
-            "Supported architectures: Llama, Mistral, Qwen, GPT-2, BERT. "
-            "Please file an issue if your model is not supported."
+            "Tried common paths: model.layers, transformer.h, transformer.layers, encoder.layer. "
+            "Please check your model structure or file an issue."
         )
 
     def _create_hook(self, layer_idx: int, transform: PCAOTTransform) -> callable:
