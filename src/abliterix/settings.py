@@ -236,6 +236,7 @@ class SteeringConfig(BaseModel):
             '"median_of_means" splits into groups and takes the median, '
             '"pca" selects the principal component of maximum variance, '
             '"optimal_transport" uses PCA-Gaussian OT to match distributions, '
+            '"pca_ot_full" uses full affine PCA-OT transformation (arxiv:2603.04355), '
             '"cosmic" uses cosine-similarity-based direction selection, '
             '"sra" uses Surgical Refusal Ablation with concept-guided spectral cleaning.'
         ),

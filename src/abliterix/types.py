@@ -6,8 +6,12 @@
 
 from dataclasses import dataclass
 from enum import Enum
+from typing import TYPE_CHECKING
 
 from pydantic import BaseModel, Field
+
+if TYPE_CHECKING:
+    import torch
 
 
 class QuantMode(str, Enum):
@@ -22,6 +26,7 @@ class VectorMethod(str, Enum):
     MEDIAN_OF_MEANS = "median_of_means"
     PCA = "pca"
     OPTIMAL_TRANSPORT = "optimal_transport"
+    PCA_OT_FULL = "pca_ot_full"  # Full affine PCA-OT from arxiv:2603.04355
     COSMIC = "cosmic"
     SRA = "sra"
 
@@ -95,6 +100,26 @@ class SteeringProfile:
     max_weight_position: float
     min_weight: float
     min_weight_distance: float
+
+
+@dataclass
+class PCAOTTransform:
+    """Full PCA-OT affine transformation for a single layer.
+
+    Stores T(x) = A_full @ x + b_full where:
+    - A_full is the full-space transformation matrix (d, d)
+    - b_full is the bias vector (d,)
+    - P is the PCA projection matrix (k, d)
+    - A_k is the OT map in reduced space (k, k)
+    - b_k is the bias in reduced space (k,)
+    """
+
+    A_full: "torch.Tensor"  # (d, d)
+    b_full: "torch.Tensor"  # (d,)
+    P: "torch.Tensor"  # (k, d)
+    A_k: "torch.Tensor"  # (k, k)
+    b_k: "torch.Tensor"  # (k,)
+    layer_idx: int
 
 
 @dataclass

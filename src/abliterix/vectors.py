@@ -40,12 +40,11 @@ def _compute_ot_transform(
     target_states: Tensor,
     n_components: int = 2,
 ) -> Tensor:
-    """Compute PCA–Gaussian Optimal Transport steering vectors.
+    """Compute PCA–Gaussian Optimal Transport steering vectors (simplified).
 
-    Instead of a simple mean-difference direction, this method computes a
-    per-layer affine transformation ``T(x) = Ax + b`` that maps the harmful
-    activation distribution onto the harmless one, capturing both mean *and*
-    covariance structure differences.
+    This is the original Abliterix implementation that returns a single
+    direction vector per layer. For the full affine transformation, use
+    _compute_pca_ot_full() instead.
 
     Parameters
     ----------
@@ -112,6 +111,135 @@ def _compute_ot_transform(
         per_layer.append(direction)
 
     return F.normalize(torch.stack(per_layer, dim=0), p=2, dim=1)
+
+
+def _compute_pca_ot_full(
+    benign_states: Tensor,
+    target_states: Tensor,
+    n_components: int = 32,
+) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor]:
+    """Compute full PCA-OT affine transformation (arxiv:2603.04355).
+
+    This implements the complete algorithm from the paper, returning the
+    full affine transformation T(x) = A_full @ x + b_full for each layer.
+
+    Algorithm:
+    1. Compute pooled mean: μ_pool = (n_h·μ_H + n_s·μ_S)/(n_h + n_s)
+    2. Center: Z = [X_H - μ_pool; X_S - μ_pool]
+    3. SVD: Z = UΣV^T, take P = V[:,:k]
+    4. Project: Y_H = (X_H - μ_pool)P, Y_S = (X_S - μ_pool)P
+    5. Compute OT in k-dim: A_k, b_k
+    6. Lift to full space: A_full = P^T A_k P, b_full = μ_S - A_full μ_H
+
+    Parameters
+    ----------
+    benign_states, target_states : Tensor
+        Shape ``(n, layers+1, hidden_dim)``.
+    n_components : int
+        PCA dimensionality (paper uses 32-64 for best results).
+
+    Returns
+    -------
+    A_full : Tensor
+        Shape ``(layers+1, hidden_dim, hidden_dim)`` - transformation matrices.
+    b_full : Tensor
+        Shape ``(layers+1, hidden_dim)`` - bias vectors.
+    P : Tensor
+        Shape ``(layers+1, n_components, hidden_dim)`` - PCA projection matrices.
+    A_k : Tensor
+        Shape ``(layers+1, n_components, n_components)`` - OT maps in reduced space.
+    b_k : Tensor
+        Shape ``(layers+1, n_components)`` - biases in reduced space.
+    """
+    n_layers = benign_states.shape[1]
+    hidden_dim = benign_states.shape[2]
+    device = benign_states.device
+    dtype = benign_states.dtype
+
+    A_full_list = []
+    b_full_list = []
+    P_list = []
+    A_k_list = []
+    b_k_list = []
+
+    for layer_idx in range(n_layers):
+        b = benign_states[:, layer_idx, :].float()  # (n_b, d)
+        t = target_states[:, layer_idx, :].float()  # (n_t, d)
+
+        n_b, n_t = b.shape[0], t.shape[0]
+
+        # Step 1: Compute pooled mean
+        mu_b = b.mean(dim=0)  # (d,)
+        mu_t = t.mean(dim=0)  # (d,)
+        mu_pool = (n_b * mu_b + n_t * mu_t) / (n_b + n_t)  # (d,)
+
+        # Step 2: Center and combine
+        b_centered = b - mu_pool  # (n_b, d)
+        t_centered = t - mu_pool  # (n_t, d)
+        Z = torch.cat([b_centered, t_centered], dim=0)  # (n_b + n_t, d)
+
+        # Step 3: SVD - take top k components
+        _, _, Vh = torch.linalg.svd(Z, full_matrices=False)
+        k = min(n_components, Vh.shape[0])
+        P = Vh[:k, :]  # (k, d)
+
+        # Step 4: Project to k-dimensional space
+        Y_b = b_centered @ P.T  # (n_b, k)
+        Y_t = t_centered @ P.T  # (n_t, k)
+
+        # Compute means in projected space
+        mu_b_proj = Y_b.mean(dim=0)  # (k,)
+        mu_t_proj = Y_t.mean(dim=0)  # (k,)
+
+        # Step 5: Compute Gaussian OT map in k-dimensional space
+        # Covariances
+        cov_b = (Y_b.T @ Y_b) / max(n_b - 1, 1)  # (k, k)
+        cov_t = (Y_t.T @ Y_t) / max(n_t - 1, 1)  # (k, k)
+
+        # Regularize for numerical stability
+        eye_k = torch.eye(k, device=device, dtype=torch.float32) * 1e-6
+        cov_b = cov_b + eye_k
+        cov_t = cov_t + eye_k
+
+        # Compute A_k = Σ_b^{-1/2} (Σ_b^{1/2} Σ_t Σ_b^{1/2})^{1/2} Σ_b^{-1/2}
+        # Using Cholesky decomposition for numerical stability
+        try:
+            L_b = torch.linalg.cholesky(cov_b)  # (k, k)
+            M = L_b @ cov_t @ L_b.T  # (k, k)
+            eigvals, eigvecs = torch.linalg.eigh(M)
+            M_sqrt = (
+                eigvecs @ torch.diag(torch.sqrt(eigvals.clamp(min=1e-8))) @ eigvecs.T
+            )
+            L_b_inv = torch.linalg.inv(L_b)
+            A_k = L_b_inv @ M_sqrt @ L_b_inv  # (k, k)
+        except RuntimeError:
+            # Fallback to identity if Cholesky fails
+            A_k = torch.eye(k, device=device, dtype=torch.float32)
+
+        # Compute b_k = μ_t - A_k μ_b (in projected space)
+        b_k = mu_t_proj - A_k @ mu_b_proj  # (k,)
+
+        # Step 6: Lift to full space
+        # A_full = P^T A_k P
+        A_full = P.T @ A_k @ P  # (d, d)
+
+        # b_full = μ_t - A_full μ_b (in original space)
+        b_full = mu_t - A_full @ mu_b  # (d,)
+
+        # Store results
+        A_full_list.append(A_full.to(dtype))
+        b_full_list.append(b_full.to(dtype))
+        P_list.append(P.to(dtype))
+        A_k_list.append(A_k.to(dtype))
+        b_k_list.append(b_k.to(dtype))
+
+    return (
+        torch.stack(A_full_list, dim=0),  # (layers+1, d, d)
+        torch.stack(b_full_list, dim=0),  # (layers+1, d)
+        torch.stack(P_list, dim=0),  # (layers+1, k, d)
+        torch.stack(A_k_list, dim=0),  # (layers+1, k, k)
+        torch.stack(b_k_list, dim=0),  # (layers+1, k)
+    )
 
 
 def _extract_multi_directions(
@@ -266,6 +394,15 @@ def compute_steering_vectors(
         # SRA already returns cleaned, normalised vectors.
         return vectors
 
+    if method == VectorMethod.PCA_OT_FULL:
+        # PCA_OT_FULL returns full affine transforms, not direction vectors.
+        # Use compute_pca_ot_transforms() instead of compute_steering_vectors()
+        # for this method.
+        raise ValueError(
+            "PCA_OT_FULL is not supported in compute_steering_vectors(). "
+            "Use compute_pca_ot_transforms() to get full affine transformations."
+        )
+
     if method == VectorMethod.OPTIMAL_TRANSPORT:
         vectors = _compute_ot_transform(
             benign_states, target_states, n_components=ot_components
@@ -331,6 +468,56 @@ def compute_steering_vectors(
         vectors = F.normalize(vectors, p=2, dim=1)
 
     return vectors
+
+
+# ---------------------------------------------------------------------------
+# PCA-OT Full Transform API
+# ---------------------------------------------------------------------------
+
+
+def compute_pca_ot_transforms(
+    benign_states: Tensor,
+    target_states: Tensor,
+    n_components: int = 32,
+) -> list["PCAOTTransform"]:
+    """Compute full PCA-OT affine transformations for all layers.
+
+    This is the public API for getting the complete affine transforms
+    that can be used by the steering engine for hook-based or weight-baked
+    interventions.
+
+    Parameters
+    ----------
+    benign_states, target_states : Tensor
+        Shape ``(n, layers+1, hidden_dim)``.
+    n_components : int
+        PCA dimensionality (paper recommends 32-64).
+
+    Returns
+    -------
+    list[PCAOTTransform]
+        One transform per layer, each containing A_full, b_full, P, A_k, b_k.
+    """
+    from .types import PCAOTTransform
+
+    A_full, b_full, P, A_k, b_k = _compute_pca_ot_full(
+        benign_states, target_states, n_components
+    )
+
+    transforms = []
+    for layer_idx in range(A_full.shape[0]):
+        transforms.append(
+            PCAOTTransform(
+                A_full=A_full[layer_idx],
+                b_full=b_full[layer_idx],
+                P=P[layer_idx],
+                A_k=A_k[layer_idx],
+                b_k=b_k[layer_idx],
+                layer_idx=layer_idx,
+            )
+        )
+
+    return transforms
 
 
 # ---------------------------------------------------------------------------

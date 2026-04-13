@@ -172,6 +172,7 @@ The deep details live in `docs/` and `benchmarks/`:
 
 - **[docs/architecture.md](docs/architecture.md)** — the 9 papers Abliterix integrates and the 5-step pipeline.
 - **[docs/methods.md](docs/methods.md)** — every steering method (SRA, Spherical, SVF, Projected, Discriminative, COSMIC, Angular, OT, Multi-direction) with the TOML knobs that control it.
+- **[docs/PCA_OT_GUIDE.md](docs/PCA_OT_GUIDE.md)** — PCA-OT full affine transformation method (arxiv:2603.04355), usage, API reference, and hyperparameter tuning.
 - **[docs/evaluation.md](docs/evaluation.md)** — why most abliteration benchmarks lie, our standards, and the architecture A/B test.
 - **[docs/moe.md](docs/moe.md)** — the four independent MoE steering mechanisms and supported MoE models.
 - **[docs/configuration.md](docs/configuration.md)** — config loading order, the 150+ shipped configs, the Web UI, and research-mode visualization.
