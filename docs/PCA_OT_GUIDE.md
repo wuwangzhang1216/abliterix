@@ -120,15 +120,12 @@ with apply_pca_ot_hooks(model, transforms, layer_indices=[15], norm_preserving=T
 Works with any HuggingFace transformer model. The hook-based approach automatically detects common layer structures.
 
 ### Target Modules for Weight Baking
-When using weight baking, you need to specify which module to modify. Common choices:
+When using weight baking, you need to specify which module to modify. This is typically the final projection in the MLP block. Common patterns:
 
-| Architecture | Target Module |
-|--------------|---------------|
-| Llama, Mistral, Qwen | `mlp.down_proj` |
-| GPT-2 | `mlp.c_proj` |
-| BERT | `output` |
+- Most modern transformers: `mlp.down_proj` or `mlp.c_proj`
+- Encoder models: `output` or `output.dense`
 
-For other architectures, inspect the model structure to find the appropriate module name (typically the final projection in the MLP or attention block).
+Inspect your model structure to find the right module name. Look for the linear layer that projects back to hidden_dim after the MLP expansion.
 
 ## API Reference
 
