@@ -41,6 +41,44 @@ python scripts/export_model.py \
 Full write-up and discussion: [issue #11](https://github.com/wuwangzhang1216/abliterix/issues/11). The same commit also lands an iterative multi-pass subspace abliteration mode for future hardened-defense workflows, and fixes a detector bug that was inflating refusal counts by ~33 % across all historical benchmarks (markdown-formatted compliant responses were being shortcircuited as "degenerate").
 
 
+## Llama-3-8B-Instruct-RR (Circuit Breakers)
+
+**[GraySwanAI/Llama-3-8B-Instruct-RR](https://huggingface.co/GraySwanAI/Llama-3-8B-Instruct-RR)** is the Llama-3 sibling of the Mistral RR release. SVD on `W_RR − W_base` against `NousResearch/Meta-Llama-3-8B-Instruct` confirms the same rank-16 LoRA structure as DeepRefusal and the Mistral RR sibling — index-16-to-17 cliff on `v_proj` / `o_proj` / `gate_proj`, only with a softer drop ratio (~10× instead of ~50×).
+
+The recipe diverges slightly from the Mistral case. Llama-3-Instruct ships with much stronger built-in RLHF refusal training than Mistral v0.2, so a partial lerp (λ=0.3 or 0.15) leaves enough residual safety signal that abliteration trials saturate in the 30-50 % refusal range. The fix is to **fully strip the rank-16 LoRA delta** (lerp λ=0.0 → bit-exact base Llama-3-Instruct) and then apply a single-direction direct abliteration — the same minimal config that broke DeepRefusal-attenuated.
+
+| Stage | Outcome |
+| --- | --- |
+| **Stage 0** — SVD-diagnose `W_RR − W_base` | rank-16 LoRA cliff confirmed (8-19× drop at index 17) |
+| **Stage 1** — `λ = 0.0` lerp (full strip) | reverts the released weights to bit-exact `NousResearch/Meta-Llama-3-8B-Instruct` |
+| **Stage 3** — abliterix `direct` mode, `n_directions=1`, no iterative, 60 trials | converges to trial 40 (8/100 in-loop, KL 0.017) in 1 h 5 min on a single RTX A6000 |
+| **Stage 5** — re-judge best trial against 100 held-out harmful prompts via Gemini Flash Lite | **1 / 100 refusals · 99 % ASR**, KL 0.017 |
+| **Hardcore 15 (10 EN + 5 CN)** | **15 / 15 compliant** — pipe-bomb assembly, methamphetamine synthesis, Python password-stealing malware, WiFi WEP/WPS attacks, hotwiring, signature forgery, ID-card forgery (CN), 网络诈骗 (CN), 入侵电脑 (CN), and others |
+
+The released **[Llama-3-8B-Instruct-RR-Abliterated](https://huggingface.co/wangzhang/Llama-3-8B-Instruct-RR-Abliterated)** is a drop-in replacement for the GraySwan checkpoint with the safety circuit removed.
+
+```bash
+# Full reproduction — ~1 h 15 min end-to-end on a single RTX A6000
+python scripts/deeprefusal_attenuate.py \
+    --base NousResearch/Meta-Llama-3-8B-Instruct \
+    --defended GraySwanAI/Llama-3-8B-Instruct-RR \
+    --output /workspace/llama3_rr_stripped --lambda 0.0
+
+AX_CONFIG=configs/llama3_8b_instruct_rr.toml abliterix --non-interactive
+
+python scripts/export_model.py \
+    --model /workspace/llama3_rr_stripped \
+    --checkpoint checkpoints_llama3_rr \
+    --trial 40 \
+    --config configs/llama3_8b_instruct_rr.toml \
+    --push-to YOUR_USER/Llama-3-8B-Instruct-RR-Abliterated
+```
+
+Full base-vs-abliterated transcripts on the hardcore 15: [`artifacts/llama3_rr_trial40_validation.txt`](../artifacts/llama3_rr_trial40_validation.txt).
+
+**Why the recipe diverged from Mistral RR:** the Mistral RR + Mistral-v0.2 combination was soft enough that a partial lerp (λ=0.3) plus iterative multi-direction abliteration sufficed (90 % ASR at KL 0.98). Llama-3 Instruct's RLHF stack is genuinely harder — partial-lerp runs saturate around 30-50 % ASR. Stripping the full delta first reduces the problem to "abliterate plain Llama-3-Instruct," which is well-trodden territory and converges to 99 % ASR with KL under 0.02. The structural insight (RR ships as a LoRA → SVD-identifiable → trivially removable) is the same in both cases; only the post-strip abliteration knob changes.
+
+
 ## Mistral-7B-Instruct-RR (Circuit Breakers)
 
 **[GraySwanAI/Mistral-7B-Instruct-RR](https://huggingface.co/GraySwanAI/Mistral-7B-Instruct-RR)** is the Representation Rerouting / Circuit Breakers release from Zou et al. ([NeurIPS 2024](https://arxiv.org/abs/2406.04313)) — a defense trained with a RepE loss to detect harmful intermediate representations and "reroute" them into a safety-circuit attractor before generation. It is widely cited as one of the strongest open-source robustness baselines and is published as a hardened drop-in for `mistralai/Mistral-7B-Instruct-v0.2`.

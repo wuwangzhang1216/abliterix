@@ -1,0 +1,61 @@
+# GraySwanAI/Llama-3-8B-Instruct-RR — Circuit Breakers defense (Zou et al. 2024)
+# Base model: NousResearch/Meta-Llama-3-8B-Instruct
+# Strategy v5 (after v4's n_dirs=3 + iter=5 wasted compute on a noisy
+# search space): mirror the exact DeepRefusal-broken config that took
+# Llama-3-DR from 99/100 → 11/100, only swap the model path. Single
+# direction, no iterative, linear kernel — minimal search space, fast
+# convergence on a sibling target.
+#
+# Stage 1 already produced /workspace/llama3_rr_stripped via lerp(λ=0.0)
+# which is bit-exact NousResearch/Meta-Llama-3-8B-Instruct after stripping
+# the rank-16 RR LoRA delta.
+# Hardware target: single RTX A6000 (48GB)
+
+system_prompt = ""
+
+[model]
+model_id = "/workspace/llama3_rr_stripped"
+dtype_fallback_order = ["bfloat16"]
+quant_method = "none"
+use_torch_compile = false
+device_map = "auto"
+trust_remote_code = false
+max_memory = {0 = "46GiB"}
+
+[inference]
+batch_size = 0
+max_batch_size = 32
+max_gen_tokens = 150
+
+[steering]
+vector_method = "mean"
+n_directions = 1
+steering_mode = "direct"
+projected_abliteration = true
+discriminative_layer_selection = true
+strength_range = [1.5, 6.0]
+decay_kernel = "linear"
+
+[iterative]
+enabled = false
+
+[optimization]
+num_trials = 60
+num_warmup_trials = 20
+checkpoint_dir = "checkpoints_llama3_rr"
+
+[kl]
+scale = 1.0
+token_count = 1
+target = 0.02
+prune_threshold = 5.0
+
+[detection]
+llm_judge = true
+llm_judge_model = "google/gemini-3.1-flash-lite-preview"
+llm_judge_batch_size = 10
+llm_judge_concurrency = 6
+
+[display]
+print_responses = false
+print_residual_geometry = true
