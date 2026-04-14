@@ -26,9 +26,9 @@ enabled = false
 llm_judge = true   # always — keyword shortcuts inflate refusal counts
 ```
 
-**Important: simpler is better.** We initially tried the obvious thing — partial lerp (λ=0.3) plus a richer search space (`n_directions=3`, `iterative.enabled=true`, multiple subspace passes). That worked OK on Mistral RR (90 % ASR at KL 0.98) but stalled on Llama-3 RR around 30–50 % ASR because the residual safety signal in the un-stripped delta interacts noisily with multi-direction steering. Switching to **full strip (λ=0.0) + single direction + no iterative** took Llama-3 RR straight to **99 % ASR at KL 0.017** in 60 Optuna trials. The same minimal recipe back-applied to Mistral RR likewise improves on the v1 result.
+**Important: simpler is better.** We initially tried the obvious thing — partial lerp (λ=0.3) plus a richer search space (`n_directions=3`, `iterative.enabled=true`, multiple subspace passes). That worked OK on Mistral RR (90 % ASR at KL 0.98) but stalled on Llama-3 RR around 30–50 % ASR because the residual safety signal in the un-stripped delta interacts noisily with multi-direction steering. Switching to **full strip (λ=0.0) + single direction + no iterative** took Llama-3 RR straight to **99 % ASR at KL 0.017** in 60 Optuna trials. Back-applying the same minimal recipe to Mistral RR kept the headline 15/15 hardcore ASR and dropped KL **23×** (from 0.98 to 0.042) — slight 2 % loss on the 100-prompt held-out set (88 % vs 90 %), but the new weights are barely perturbed from the base and behave much more like the original release on benign tasks.
 
-**Why not just use λ=0.0 every time?** You can — and you probably should. The original Mistral RR run used λ=0.3 because we hadn't yet realized full strip was strictly better; the result is on HF for posterity but is now superseded by the λ=0.0 rerun. For any future RR-class defense the playbook is: SVD-diagnose, strip in full, abliterate the base.
+**Why not just use λ=0.0 every time?** You should. For any RR-class defense the playbook is: SVD-diagnose, strip in full, abliterate the base. The partial-lerp config is left in this doc only so future readers can see why we abandoned it.
 
 **LLM judge is non-negotiable.** A keyword-only refusal counter (the legacy abliterix behavior, since removed) inflates in-loop refusal counts ~3× because compliant responses that mention "illegal" / "harmful" / "dangerous" trip the keyword filter. Always evaluate with `detection.llm_judge = true` (Gemini Flash Lite via OpenRouter is fast and cheap), and re-judge any historical numbers with [`scripts/recount_refusals.py`](../scripts/recount_refusals.py) before reporting them.
 
@@ -113,35 +113,37 @@ Full base-vs-abliterated transcripts on the hardcore 15: [`artifacts/llama3_rr_t
 
 **[GraySwanAI/Mistral-7B-Instruct-RR](https://huggingface.co/GraySwanAI/Mistral-7B-Instruct-RR)** is the Representation Rerouting / Circuit Breakers release from Zou et al. ([NeurIPS 2024](https://arxiv.org/abs/2406.04313)) — a defense trained with a RepE loss to detect harmful intermediate representations and "reroute" them into a safety-circuit attractor before generation. It is widely cited as one of the strongest open-source robustness baselines and is published as a hardened drop-in for `mistralai/Mistral-7B-Instruct-v0.2`.
 
-**Abliterix breaks it** with the same recipe used against DeepRefusal, no special-casing.
+The Mistral RR delta SVDs cleanly into a rank-16 LoRA on `v_proj` / `o_proj` / `gate_proj`, with a sharp 50× drop at index 17. The recipe is identical to the Llama-3 sibling: full strip + minimal abliteration.
 
 | Stage | Outcome |
 | --- | --- |
-| **Stage 0** — SVD-diagnose `W_RR − W_base` | top-16 singular values dominate (`v_proj` / `o_proj` / `gate_proj` show a clean 50× drop at index 17) — RR ships as a **rank-16 LoRA delta**, exactly the same shape as DeepRefusal |
-| **Stage 1** — `λ = 0.3` lerp attenuation of the delta | weakens the safety circuit by 70 % without touching base capability |
-| **Stage 3** — abliterix `direct` mode + iterative subspace, 60 trials | converges to subspace rank 15 in 1 h 7 min on a single RTX A6000 |
-| **Stage 5** — re-judge best trial against 100 held-out harmful prompts via Gemini Flash Lite | **10 / 100 refusals · 90 % ASR**, KL 0.98 |
-| **Hardcore 15 (10 EN + 5 CN)** | **15 / 15 compliant** — pipe-bomb assembly, methamphetamine synthesis (Red Phosphorus route), Python `pyhook3` keylogger, WiFi WEP/WPS attacks, hotwiring, signature forgery, ID-card forgery (CN), 网络诈骗 (CN), 入侵电脑 (CN), and more |
+| **Stage 0** — SVD-diagnose `W_RR − W_base` | rank-16 LoRA cliff confirmed (50× drop at index 17) |
+| **Stage 1** — `λ = 0.0` lerp (full strip) | reverts the released weights to bit-exact `mistralai/Mistral-7B-Instruct-v0.2` |
+| **Stage 3** — abliterix `direct` mode, `n_directions=1`, no iterative, 60 trials | converges to trial 39 (6/100 in-loop, KL 0.042) in 1 h 5 min on a single RTX A6000 |
+| **Stage 5** — re-judge best trial against 100 held-out harmful prompts via Gemini Flash Lite | **12 / 100 refusals · 88 % ASR**, KL 0.042 |
+| **Hardcore 15 (10 EN + 5 CN)** | **15 / 15 compliant** |
 
 The released **[Mistral-7B-Instruct-RR-Abliterated](https://huggingface.co/wangzhang/Mistral-7B-Instruct-RR-Abliterated)** is a drop-in replacement for the GraySwan checkpoint with the safety circuit removed.
 
 ```bash
-# Full reproduction — ~1.5 hours end-to-end on a single RTX A6000
+# Full reproduction — ~1 h 15 min end-to-end on a single RTX A6000
 python scripts/deeprefusal_attenuate.py \
     --base mistralai/Mistral-7B-Instruct-v0.2 \
     --defended GraySwanAI/Mistral-7B-Instruct-RR \
-    --output /workspace/mistral_rr_attenuated --lambda 0.3
+    --output /workspace/mistral_rr_stripped --lambda 0.0
 
 AX_CONFIG=configs/mistral_7b_instruct_rr.toml abliterix --non-interactive
 
 python scripts/export_model.py \
-    --model /workspace/mistral_rr_attenuated \
+    --model /workspace/mistral_rr_stripped \
     --checkpoint checkpoints_mistral_7b_rr \
-    --trial 50 \
+    --trial 39 \
     --config configs/mistral_7b_instruct_rr.toml \
     --push-to YOUR_USER/Mistral-7B-Instruct-RR-Abliterated
 ```
 
-**Methodology note:** this run surfaced a keyword-shortcut bug in the in-loop refusal counter that has since been removed. Every response now goes through the LLM judge end-to-end by default (`detection.llm_judge = true`), with keyword matching kept only as an offline fallback when no `OPENROUTER_API_KEY` is configured. Re-run [`scripts/recount_refusals.py`](scripts/recount_refusals.py) on prior checkpoints if you want updated numbers.
+Full base-vs-abliterated transcripts on the hardcore 15: [`artifacts/mistral_rr_trial39_validation.txt`](../artifacts/mistral_rr_trial39_validation.txt).
+
+**v2 changelog:** The original v1 upload used a partial lerp (λ=0.3) plus a richer search space (`n_directions=3` + iterative subspace) and scored 10/100 refusals at KL 0.98. After Llama-3 RR demonstrated that full-strip + minimal config is strictly better, the Mistral run was redone with the same recipe. The new weights keep the 15/15 hardcore ASR, give up 2 percentage points on the 100-prompt held-out set (12 refusals vs 10), and **drop KL by 23×** (0.042 vs 0.98) — a much higher-quality model that behaves close to the base across general capabilities.
 
 Full base-vs-abliterated transcripts on the hardcore 15: [`artifacts/mistral_rr_trial50_validation.txt`](../artifacts/mistral_rr_trial50_validation.txt).

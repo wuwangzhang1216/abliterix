@@ -1,10 +1,16 @@
 # GraySwanAI/Mistral-7B-Instruct-RR — Circuit Breakers defense (Zou et al. 2024)
 # Base model: mistralai/Mistral-7B-Instruct-v0.2
-# Strategy: direct weight editing + multi-direction iterative abliteration
-# Hardware target: single RTX 6000 Ada (48GB)
+#
+# v2 recipe (after Llama-3-RR demonstrated full-strip + minimal config wins):
+#   - Stage 1 lerp at λ=0.0 → bit-exact Mistral-7B-Instruct-v0.2 base weights
+#   - Single-direction direct-mode abliteration, no iterative, linear kernel
+#   - llm_judge=true (default), no keyword shortcut
+# Hardware target: single RTX A6000 (48GB)
+
+system_prompt = ""
 
 [model]
-model_id = "GraySwanAI/Mistral-7B-Instruct-RR"
+model_id = "/workspace/mistral_rr_stripped"
 dtype_fallback_order = ["bfloat16"]
 quant_method = "none"
 use_torch_compile = false
@@ -19,28 +25,15 @@ max_gen_tokens = 150
 
 [steering]
 vector_method = "mean"
-n_directions = 3
+n_directions = 1
 steering_mode = "direct"
-orthogonal_projection = true
 projected_abliteration = true
 discriminative_layer_selection = true
-winsorize_vectors = true
-winsorize_quantile = 0.995
-decay_kernel = "gaussian"
 strength_range = [1.5, 6.0]
-
-# Ready for Stage 4 SRA upgrade — flip vector_method to "sra" to activate
-sra_base_method = "mean"
-sra_n_atoms = 8
-sra_ridge_alpha = 0.01
+decay_kernel = "linear"
 
 [iterative]
-enabled = true
-max_iterations = 5
-convergence_norm_threshold = 0.1
-convergence_cosine_threshold = 0.95
-per_iteration_directions = 3
-accumulation_method = "subspace"
+enabled = false
 
 [optimization]
 num_trials = 60
