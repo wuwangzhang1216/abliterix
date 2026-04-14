@@ -33,7 +33,7 @@ dependencies = [
     "psutil~=7.1",
     "pydantic-settings~=2.10",
     "questionary~=2.1",
-    "rich~=14.1",
+    "rich>=14.1,<16.0",
     "transformers~=5.3",
 ]
 
