@@ -570,13 +570,27 @@ class DetectionConfig(BaseModel):
 
     llm_judge: bool = Field(
         default=True,
-        description="Route every response through an external LLM judge via OpenRouter. "
+        description="Route every response through an external LLM judge via OpenRouter or MiniMax. "
         "Set to False to use keyword matching as a fallback when no API key is available.",
     )
 
     llm_judge_model: str = Field(
         default="google/gemini-3.1-flash-lite-preview",
-        description="OpenRouter model identifier used for LLM-based classification.",
+        description=(
+            "Model identifier for LLM-based classification.  "
+            "For OpenRouter (default): use any OpenRouter model slug.  "
+            "For MiniMax: use 'MiniMax-M2.7' or 'MiniMax-M2.7-highspeed'."
+        ),
+    )
+
+    llm_judge_base_url: str | None = Field(
+        default=None,
+        description=(
+            "Override the judge API base URL.  None (default) routes to OpenRouter "
+            "(https://openrouter.ai/api/v1, requires OPENROUTER_API_KEY).  "
+            "Set to 'https://api.minimax.io/v1' to use MiniMax as the judge backend "
+            "(requires MINIMAX_API_KEY)."
+        ),
     )
 
     llm_judge_batch_size: int = Field(

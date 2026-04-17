@@ -31,6 +31,17 @@ from ..util import print
 _CACHE_SCHEMA_VERSION = 1
 
 
+def _resolve_judge_api_key(config: AbliterixConfig) -> str:
+    """Return the judge API key for the configured backend.
+
+    When ``llm_judge_base_url`` is set (e.g. MiniMax), reads ``MINIMAX_API_KEY``.
+    Otherwise falls back to ``OPENROUTER_API_KEY`` for the default OpenRouter path.
+    """
+    if config.detection.llm_judge_base_url is not None:
+        return "".join(os.environ.get("MINIMAX_API_KEY", "").split())
+    return "".join(os.environ.get("OPENROUTER_API_KEY", "").split())
+
+
 # ---------------------------------------------------------------------------
 # Persistent classification cache (sqlite3, thread-safe)
 # ---------------------------------------------------------------------------
@@ -248,10 +259,12 @@ class RefusalDetector:
         self._cache: ClassificationCache | None = None
 
         if config.detection.llm_judge:
-            if not "".join(os.environ.get("OPENROUTER_API_KEY", "").split()):
+            api_key = _resolve_judge_api_key(config)
+            if not api_key:
                 print(
-                    "[yellow]Warning: llm_judge enabled but OPENROUTER_API_KEY "
-                    "not set; will fall back to keyword matching.[/]"
+                    "[yellow]Warning: llm_judge enabled but no judge API key "
+                    "(OPENROUTER_API_KEY or MINIMAX_API_KEY) is set; "
+                    "will fall back to keyword matching.[/]"
                 )
             else:
                 print(
@@ -528,7 +541,12 @@ class RefusalDetector:
     # ------------------------------------------------------------------
 
     def _query_judge_api(self, batch: list[tuple[str, str]]) -> list[bool]:
-        """Send a batch to the OpenRouter LLM judge; fall back to keywords on failure."""
+        """Send a batch to the LLM judge API; fall back to keywords on failure.
+
+        Supports OpenRouter (default) and MiniMax via ``llm_judge_base_url``.
+        When a custom base URL is configured, ``MINIMAX_API_KEY`` is used;
+        otherwise the default OpenRouter path requires ``OPENROUTER_API_KEY``.
+        """
         truncated = [(q[:200], r[:500]) for q, r in batch]
 
         results: list[bool | None] = [None] * len(batch)
@@ -547,41 +565,64 @@ class RefusalDetector:
         if not uncached:
             return cast(list[bool], results)
 
-        api_key = "".join(os.environ.get("OPENROUTER_API_KEY", "").split())
+        api_key = _resolve_judge_api_key(self.config)
         if not api_key:
             raise RuntimeError(
-                "LLM judge is enabled but OPENROUTER_API_KEY is not set. "
+                "LLM judge is enabled but no judge API key is set "
+                "(OPENROUTER_API_KEY for OpenRouter or MINIMAX_API_KEY for MiniMax). "
                 "Refusing to fall back to keyword matching."
             )
+
+        base_url = self.config.detection.llm_judge_base_url
+        is_minimax = base_url is not None
+        endpoint_url = (
+            base_url.rstrip("/") + "/chat/completions"
+            if base_url
+            else "https://openrouter.ai/api/v1/chat/completions"
+        )
 
         entries = []
         for j, idx in enumerate(uncached, 1):
             q, r = batch[idx]
             entries.append(f"{j}. Question: {q[:200]}\n   Response: {r[:500]}")
 
-        body = json.dumps(
-            {
-                "model": self.config.detection.llm_judge_model,
-                "messages": [
-                    {"role": "user", "content": self._JUDGE_PROMPT + "\n".join(entries)}
-                ],
-                "temperature": 0,
-                "max_tokens": len(uncached) * 5 + 50,
-                "response_format": self._JUDGE_RESPONSE_FORMAT,
-            }
-        ).encode("utf-8")
+        # MiniMax reasoning models include a <think>…</think> block before the
+        # answer; reserve extra tokens to ensure the full JSON reply is generated.
+        _MINIMAX_THINK_BUDGET = 512
+        max_tokens = len(uncached) * 5 + 50
+        if is_minimax:
+            max_tokens += _MINIMAX_THINK_BUDGET
+
+        request_body: dict = {
+            "model": self.config.detection.llm_judge_model,
+            "messages": [
+                {"role": "user", "content": self._JUDGE_PROMPT + "\n".join(entries)}
+            ],
+            "max_tokens": max_tokens,
+        }
+
+        if is_minimax:
+            # MiniMax: temperature must be in (0.0, 1.0]; response_format unsupported.
+            request_body["temperature"] = 1.0
+        else:
+            # OpenRouter: structured JSON output via response_format.
+            request_body["temperature"] = 0
+            request_body["response_format"] = self._JUDGE_RESPONSE_FORMAT
+
+        body = json.dumps(request_body).encode("utf-8")
 
         headers = {
             "Authorization": "Bearer " + api_key,
             "Content-Type": "application/json",
-            "HTTP-Referer": "https://github.com/wuwangzhang1216/abliterix",
-            "X-Title": "abliterix",
         }
+        if not is_minimax:
+            headers["HTTP-Referer"] = "https://github.com/wuwangzhang1216/abliterix"
+            headers["X-Title"] = "abliterix"
 
         for attempt in range(3):
             try:
                 req = urllib.request.Request(
-                    "https://openrouter.ai/api/v1/chat/completions",
+                    endpoint_url,
                     data=body,
                     headers=headers,
                     method="POST",
@@ -590,6 +631,11 @@ class RefusalDetector:
                     data = json.loads(resp.read().decode("utf-8"))
 
                 content = data["choices"][0]["message"]["content"].strip()
+                # MiniMax reasoning models wrap chain-of-thought in <think>…</think>.
+                # Strip that block so the remaining text is pure JSON.
+                content = re.sub(
+                    r"<think>.*?</think>", "", content, flags=re.DOTALL
+                ).strip()
                 parsed = json.loads(content)
                 classifications = (
                     parsed["labels"] if isinstance(parsed, dict) else parsed
