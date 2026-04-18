@@ -31,15 +31,21 @@ from ..util import print
 _CACHE_SCHEMA_VERSION = 1
 
 
-def _resolve_judge_api_key(config: AbliterixConfig) -> str:
-    """Return the judge API key for the configured backend.
+def _judge_api_key_env(config: AbliterixConfig) -> str:
+    """Return the env var name that holds the judge bearer token."""
+    explicit = config.detection.llm_judge_api_key_env
+    if explicit:
+        return explicit
+    return (
+        "OPENROUTER_API_KEY"
+        if config.detection.llm_judge_base_url is None
+        else "LLM_JUDGE_API_KEY"
+    )
 
-    When ``llm_judge_base_url`` is set (e.g. MiniMax), reads ``MINIMAX_API_KEY``.
-    Otherwise falls back to ``OPENROUTER_API_KEY`` for the default OpenRouter path.
-    """
-    if config.detection.llm_judge_base_url is not None:
-        return "".join(os.environ.get("MINIMAX_API_KEY", "").split())
-    return "".join(os.environ.get("OPENROUTER_API_KEY", "").split())
+
+def _resolve_judge_api_key(config: AbliterixConfig) -> str:
+    """Return the judge API key from the resolved env var (whitespace-stripped)."""
+    return "".join(os.environ.get(_judge_api_key_env(config), "").split())
 
 
 # ---------------------------------------------------------------------------
@@ -260,11 +266,11 @@ class RefusalDetector:
 
         if config.detection.llm_judge:
             api_key = _resolve_judge_api_key(config)
+            env_var = _judge_api_key_env(config)
             if not api_key:
                 print(
-                    "[yellow]Warning: llm_judge enabled but no judge API key "
-                    "(OPENROUTER_API_KEY or MINIMAX_API_KEY) is set; "
-                    "will fall back to keyword matching.[/]"
+                    f"[yellow]Warning: llm_judge enabled but {env_var} "
+                    "is not set; will fall back to keyword matching.[/]"
                 )
             else:
                 print(
@@ -543,9 +549,12 @@ class RefusalDetector:
     def _query_judge_api(self, batch: list[tuple[str, str]]) -> list[bool]:
         """Send a batch to the LLM judge API; fall back to keywords on failure.
 
-        Supports OpenRouter (default) and MiniMax via ``llm_judge_base_url``.
-        When a custom base URL is configured, ``MINIMAX_API_KEY`` is used;
-        otherwise the default OpenRouter path requires ``OPENROUTER_API_KEY``.
+        Works against any OpenAI-compatible ``/chat/completions`` endpoint.
+        ``llm_judge_base_url=None`` routes to OpenRouter (with attribution
+        headers); any other value sends the request to that endpoint using
+        the standard OpenAI wire format, with provider-specific quirks driven
+        entirely by explicit config fields (temperature, response_format,
+        reasoning budget, api-key env var).
         """
         truncated = [(q[:200], r[:500]) for q, r in batch]
 
@@ -567,18 +576,18 @@ class RefusalDetector:
 
         api_key = _resolve_judge_api_key(self.config)
         if not api_key:
+            env_var = _judge_api_key_env(self.config)
             raise RuntimeError(
-                "LLM judge is enabled but no judge API key is set "
-                "(OPENROUTER_API_KEY for OpenRouter or MINIMAX_API_KEY for MiniMax). "
+                f"LLM judge is enabled but {env_var} is not set. "
                 "Refusing to fall back to keyword matching."
             )
 
         base_url = self.config.detection.llm_judge_base_url
-        is_minimax = base_url is not None
+        is_openrouter = base_url is None
         endpoint_url = (
-            base_url.rstrip("/") + "/chat/completions"
-            if base_url
-            else "https://openrouter.ai/api/v1/chat/completions"
+            "https://openrouter.ai/api/v1/chat/completions"
+            if base_url is None
+            else base_url.rstrip("/") + "/chat/completions"
         )
 
         entries = []
@@ -586,36 +595,40 @@ class RefusalDetector:
             q, r = batch[idx]
             entries.append(f"{j}. Question: {q[:200]}\n   Response: {r[:500]}")
 
-        # MiniMax reasoning models include a <think>…</think> block before the
-        # answer; reserve extra tokens to ensure the full JSON reply is generated.
-        _MINIMAX_THINK_BUDGET = 512
+        # Reasoning-model judges (MiniMax, DeepSeek-R1, QwQ, Kimi-reasoning,
+        # local reasoners, …) emit hidden chain-of-thought tokens before the
+        # JSON answer; reserve extra max_tokens so the reply isn't truncated.
+        # Only applied on custom endpoints — OpenRouter's default slug is a
+        # non-reasoning model and we don't want to burn tokens for nothing.
+        # Set llm_judge_reasoning_budget=0 to opt out for non-reasoning custom
+        # endpoints (e.g. a local Qwen2.5 instance).
         max_tokens = len(uncached) * 5 + 50
-        if is_minimax:
-            max_tokens += _MINIMAX_THINK_BUDGET
+        if not is_openrouter:
+            budget = self.config.detection.llm_judge_reasoning_budget
+            if budget is None:
+                budget = 256 + 32 * len(uncached)
+            max_tokens += budget
 
         request_body: dict = {
             "model": self.config.detection.llm_judge_model,
             "messages": [
                 {"role": "user", "content": self._JUDGE_PROMPT + "\n".join(entries)}
             ],
-            "max_tokens": max_tokens,
+            "temperature": self.config.detection.llm_judge_temperature,
+            self.config.detection.llm_judge_max_tokens_field: max_tokens,
         }
-
-        if is_minimax:
-            # MiniMax: temperature must be in (0.0, 1.0]; response_format unsupported.
-            request_body["temperature"] = 1.0
-        else:
-            # OpenRouter: structured JSON output via response_format.
-            request_body["temperature"] = 0
+        if self.config.detection.llm_judge_use_response_format:
             request_body["response_format"] = self._JUDGE_RESPONSE_FORMAT
 
         body = json.dumps(request_body).encode("utf-8")
 
         headers = {
-            "Authorization": "Bearer " + api_key,
+            self.config.detection.llm_judge_auth_header: (
+                self.config.detection.llm_judge_auth_prefix + api_key
+            ),
             "Content-Type": "application/json",
         }
-        if not is_minimax:
+        if is_openrouter:
             headers["HTTP-Referer"] = "https://github.com/wuwangzhang1216/abliterix"
             headers["X-Title"] = "abliterix"
 
@@ -631,8 +644,9 @@ class RefusalDetector:
                     data = json.loads(resp.read().decode("utf-8"))
 
                 content = data["choices"][0]["message"]["content"].strip()
-                # MiniMax reasoning models wrap chain-of-thought in <think>…</think>.
-                # Strip that block so the remaining text is pure JSON.
+                # Reasoning models wrap chain-of-thought in <think>…</think>;
+                # strip it so the remaining text is pure JSON. No-op for
+                # non-reasoning responses — the regex just doesn't match.
                 content = re.sub(
                     r"<think>.*?</think>", "", content, flags=re.DOTALL
                 ).strip()
