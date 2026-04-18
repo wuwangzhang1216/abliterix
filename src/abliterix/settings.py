@@ -570,26 +570,104 @@ class DetectionConfig(BaseModel):
 
     llm_judge: bool = Field(
         default=True,
-        description="Route every response through an external LLM judge via OpenRouter or MiniMax. "
+        description="Route every response through an external LLM judge over an "
+        "OpenAI-compatible chat/completions API. "
         "Set to False to use keyword matching as a fallback when no API key is available.",
     )
 
     llm_judge_model: str = Field(
         default="google/gemini-3.1-flash-lite-preview",
         description=(
-            "Model identifier for LLM-based classification.  "
-            "For OpenRouter (default): use any OpenRouter model slug.  "
-            "For MiniMax: use 'MiniMax-M2.7' or 'MiniMax-M2.7-highspeed'."
+            "Model identifier sent in the `model` request field.  Use whatever "
+            "slug the configured endpoint expects (OpenRouter slugs like "
+            "'anthropic/claude-haiku-4.5', MiniMax's 'MiniMax-M2.7', a local "
+            "vLLM-served checkpoint name, etc.)."
         ),
     )
 
     llm_judge_base_url: str | None = Field(
         default=None,
         description=(
-            "Override the judge API base URL.  None (default) routes to OpenRouter "
-            "(https://openrouter.ai/api/v1, requires OPENROUTER_API_KEY).  "
-            "Set to 'https://api.minimax.io/v1' to use MiniMax as the judge backend "
-            "(requires MINIMAX_API_KEY)."
+            "OpenAI-compatible judge API base URL.  None (default) routes to "
+            "OpenRouter (https://openrouter.ai/api/v1) and sends abliterix "
+            "attribution headers.  Set to any other OpenAI-compatible endpoint "
+            "to route the judge there — hosted (api.minimax.io/v1, "
+            "api.deepinfra.com/v1, api.together.xyz/v1) or a local server "
+            "(vLLM / SGLang / Ollama / llama.cpp / LM Studio)."
+        ),
+    )
+
+    llm_judge_api_key_env: str | None = Field(
+        default=None,
+        description=(
+            "Environment variable name to read the judge bearer token from.  "
+            "When None (default), uses OPENROUTER_API_KEY if llm_judge_base_url "
+            "is None, otherwise LLM_JUDGE_API_KEY.  Set explicitly "
+            "(e.g. 'MINIMAX_API_KEY', 'TOGETHER_API_KEY') to route different "
+            "backends through different tokens without touching code."
+        ),
+    )
+
+    llm_judge_auth_header: str = Field(
+        default="Authorization",
+        description=(
+            "HTTP header name to carry the API key.  Default 'Authorization' "
+            "works for every standard OpenAI-compatible endpoint.  Set to "
+            "'api-key' for Azure OpenAI (which rejects Bearer auth under the "
+            "classic REST API surface)."
+        ),
+    )
+
+    llm_judge_auth_prefix: str = Field(
+        default="Bearer ",
+        description=(
+            "Prefix prepended to the API key inside the auth header.  Default "
+            "'Bearer ' is standard OpenAI.  Set to '' (empty string) for Azure "
+            "OpenAI, which expects the raw key value with no prefix."
+        ),
+    )
+
+    llm_judge_temperature: float = Field(
+        default=0.0,
+        description=(
+            "Sampling temperature for the judge model.  0 (default) gives "
+            "maximum determinism for OpenRouter / vLLM / most OpenAI-compatible "
+            "endpoints.  MiniMax requires (0.0, 1.0] — set 1.0 for MiniMax-M2.7."
+        ),
+    )
+
+    llm_judge_use_response_format: bool = Field(
+        default=True,
+        description=(
+            "Send a JSON-schema `response_format` to enforce structured output.  "
+            "Supported by OpenRouter, vLLM, and most OpenAI-compatible servers.  "
+            "Set False for providers that reject it (MiniMax, some older "
+            "llama.cpp builds, certain local runtimes) — the prompt already "
+            "instructs JSON output as a fallback."
+        ),
+    )
+
+    llm_judge_max_tokens_field: str = Field(
+        default="max_tokens",
+        description=(
+            "Request-body field name for the output-token cap.  'max_tokens' "
+            "(default) works for OpenRouter, MiniMax, vLLM, SGLang, Together, "
+            "DeepInfra, and most OpenAI-compatible servers.  Set to "
+            "'max_completion_tokens' for OpenAI's newer models (gpt-5.x / "
+            "o-series) which rejected the legacy name."
+        ),
+    )
+
+    llm_judge_reasoning_budget: int | None = Field(
+        default=None,
+        description=(
+            "Extra max_tokens reserved for a reasoning-model judge's hidden "
+            "chain-of-thought (e.g. MiniMax, DeepSeek-V3.2-Speciale / reasoner, "
+            "Qwen3-Thinking, Kimi K2-Thinking, GPT-5.4-Thinking).  "
+            "Only applied when llm_judge_base_url is set.  When None (default), "
+            "auto-scales with batch size as 256 + 32 * batch_size.  Set an "
+            "explicit int to override (e.g. 1024 for very verbose reasoners, "
+            "0 to disable entirely for non-reasoning models)."
         ),
     )
 
