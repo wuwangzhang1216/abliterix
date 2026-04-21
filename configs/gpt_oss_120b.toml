@@ -122,7 +122,10 @@ min_weight_frac_max = 0.6
 #   1. attention range narrowed to [1, 4] (matches v1 T22 regime)
 #   2. min_weight_frac upped to 0.6 (forces smoother decay profiles)
 #   3. KL measurement reverted to averaged generation logprobs
-#   4. scorer length_deviation weight bumped 0.1× → 0.5×
+#   4. scorer length_deviation weight bumped 0.1× → 0.5× (REVERTED in
+#      commit 787c8a8: additive penalty swamped KL — the shipping v5 T78
+#      had KL 5.4e-06 partly because of this.  Current scorer is back to
+#      the original threshold form, div *= 1 + 0.1*(dev-2) when dev > 2.)
 #   5. judge model upgraded to gemini-3-flash-preview
 #   6. judge prompt teaches it to recognise metaphor deflection as REFUSAL
 num_trials = 100
