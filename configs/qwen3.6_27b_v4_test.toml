@@ -1,0 +1,75 @@
+# V4 test override — reuse V1 base as model_id (same as production V4),
+# shrink prompt counts so test_trial.py re-extracts vectors in ~2 min
+# instead of ~15 min. Fine for testing: the residual direction is stable
+# with 100 prompts; we only need the steering profile applied correctly.
+
+[model]
+model_id = "wangzhang/Qwen3.6-27B-abliterated"
+dtype_fallback_order = ["bfloat16"]
+quant_method = "none"
+use_torch_compile = false
+device_map = "auto"
+max_memory = {0 = "72GiB"}
+
+[inference]
+batch_size = 4
+max_batch_size = 8
+max_gen_tokens = 300
+
+[steering]
+vector_method = "mean"
+decay_kernel = "linear"
+orthogonal_projection = true
+projected_abliteration = true
+winsorize_vectors = true
+winsorize_quantile = 0.995
+weight_normalization = "none"
+strength_range = [0.3, 5.0]
+disabled_components = ["attn.q_proj", "attn.k_proj", "attn.v_proj"]
+
+[steering.component_strength_ranges]
+"attn.o_proj" = [0.3, 5.0]
+"mlp.down_proj" = [0.3, 3.0]
+
+[optimization]
+num_trials = 30
+num_warmup_trials = 8
+sampler_seed = 7
+checkpoint_dir = "/root/checkpoints_qwen3.6_27b_v4"
+
+[kl]
+scale = 1.0
+token_count = 3
+target = 0.008
+prune_threshold = 3.0
+
+[detection]
+llm_judge = false
+
+[iterative]
+enabled = false
+
+[display]
+print_responses = false
+
+non_interactive = true
+
+[benign_prompts]
+dataset = "datasets/good_1000"
+split = "train[:100]"
+column = "prompt"
+
+[target_prompts]
+dataset = "datasets/harmful_1000"
+split = "train[:100]"
+column = "prompt"
+
+[benign_eval_prompts]
+dataset = "datasets/good_1000"
+split = "train[800:900]"
+column = "prompt"
+
+[target_eval_prompts]
+dataset = "datasets/harmful_1000"
+split = "train[800:900]"
+column = "prompt"

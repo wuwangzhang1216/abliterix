@@ -1,0 +1,134 @@
+# Qwen3.6-27B V3 — iterative abliteration for sub-10/100 refusal target.
+#
+# V1 shipped: wangzhang/Qwen3.6-27B-abliterated (trial 25 = 16/100 @ KL 0.0181)
+# V2 null result: unified-bucket beat GDN/full-attn split (26/100 plateau)
+#
+# V3 strategy — iterative extract-project cycle:
+#   1. Iter 1: Search 30 trials → apply best to weights in-place
+#   2. Iter 2: Re-extract refusal direction from the partially-abliterated
+#      model (the *residual* refusal that iter 1's single projection missed
+#      lives in directions orthogonal to iter 1's direction). Run another
+#      30-trial search. Apply best.
+#   3. (Optional iter 3 if convergence thresholds aren't hit.)
+#
+# Expected trajectory: 16/100 → 8-10/100 after iter 1, → 3-6/100 after iter 2.
+# This is the TrevorS "DeepRefusal-peel" recipe — the only known method that
+# gets sub-5/100 on hardened modern dense checkpoints without quality loss.
+#
+# Hardware:
+#   - A100 SXM 80 GB (sm_80): ~2.5h/iter × 2 = 5h, $7-10 on vast.ai
+#   - H100 80 GB (sm_90): ~2h/iter × 2 = 4h, $12-16
+#   - RTX Pro 6000 Blackwell (sm_120): ~6h/iter × 2 = 12h, $20
+#     (slower due to GDN kernel falling back to eager on Blackwell)
+#
+# Recipe holds V1's winning architecture:
+#   - Unified attn.o_proj bucket (48 GDN linear_attn.out_proj + 16 full-attn
+#     self_attn.o_proj registered under the same key). V2's experimental split
+#     was worse; keep them unified.
+#   - Q/K/V disabled (only live on 16/64 layers; concentrating budget on
+#     layer-uniform components wins).
+#   - projected_abliteration + winsorized vectors (grimjim).
+#   - LoRA-mode search, merge_and_unload() at export.
+
+[model]
+model_id = "Qwen/Qwen3.6-27B"
+dtype_fallback_order = ["bfloat16"]
+quant_method = "none"
+use_torch_compile = false
+device_map = "auto"
+# A100-80GB: 54 GB model + 8 GB KV/activation headroom at bs=8.
+# Adjust to "90GiB" for RTX Pro 6000, "130GiB" for H200, etc.
+max_memory = {0 = "72GiB"}
+
+[inference]
+batch_size = 0
+# A100 sm_80 has mature flash-attn 2/3 kernels. bs=8 is stable on
+# Qwen3.5-27B per its shipped config. bs=4 is the Blackwell floor (GDN
+# kernel regresses above that). Keeping max=8 so auto-batch picks best.
+max_batch_size = 8
+max_gen_tokens = 100
+
+[steering]
+vector_method = "mean"
+decay_kernel = "linear"
+orthogonal_projection = true
+projected_abliteration = true
+winsorize_vectors = true
+winsorize_quantile = 0.995
+weight_normalization = "none"
+
+# V1 trial 25 winner lived in [3, 6] for attn.o_proj and [0.5, 2] for mlp.
+# Iter 2 state is unknown (model is partially abliterated) — keep V1 ranges
+# so TPE can re-explore if iter 2's winning region differs.
+strength_range = [1.0, 5.0]
+
+disabled_components = ["attn.q_proj", "attn.k_proj", "attn.v_proj"]
+
+[steering.component_strength_ranges]
+# V1 winner = 5.17 (near 6.0 ceiling). Push ceiling to 8.0 so TPE has
+# headroom to explore stronger attention steering.
+"attn.o_proj" = [1.0, 8.0]
+# V1 confirmed mlp is weak — keep V1 range unchanged.
+"mlp.down_proj" = [1.0, 5.0]
+
+[optimization]
+# 40 trials (V1 used 30, winner was trial 25 → 15 trials of deep
+# exploitation remained after breakthrough. Bump to 40 for more time
+# near the winning region.).
+num_trials = 40
+num_warmup_trials = 10
+# Seed != V1 (which was unseeded) so TPE takes a different trajectory.
+sampler_seed = 42
+checkpoint_dir = "checkpoints_qwen3.6_27b_v3"
+
+[kl]
+scale = 1.0
+token_count = 3
+# V1 trial 25 achieved KL=0.0181. Iter 2 adds on top — accept ~0.03-0.04
+# cumulative KL budget. Target 0.01 per iteration keeps each pass clean.
+target = 0.01
+prune_threshold = 5.0
+
+[detection]
+llm_judge = true
+llm_judge_model = "google/gemini-3-flash-preview"
+llm_judge_batch_size = 10
+llm_judge_concurrency = 25
+
+[iterative]
+# Disabled for V3: iterative + LoRA steering hits an IndexError at
+# steering.py:376 — sv_by_device shape (2, hidden) is the subspace basis
+# but apply_steering expects (n_layers+1, hidden). Bug is in abliterix's
+# interaction between iterative accumulation and LoRA per-layer indexing;
+# not fixable in config. Falling back to single-pass with wider ranges
+# and seeded TPE, betting the headroom+seed combo finds a better local
+# optimum than V1's trial 25 (16/100). Would need abliterix-level patch
+# or direct-steering mode to rescue iterative.
+enabled = false
+
+[display]
+print_responses = false
+print_residual_geometry = false
+plot_residuals = false
+
+non_interactive = true
+
+[benign_prompts]
+dataset = "datasets/good_1000"
+split = "train[:800]"
+column = "prompt"
+
+[target_prompts]
+dataset = "datasets/harmful_1000"
+split = "train[:800]"
+column = "prompt"
+
+[benign_eval_prompts]
+dataset = "datasets/good_1000"
+split = "train[800:900]"
+column = "prompt"
+
+[target_eval_prompts]
+dataset = "datasets/harmful_1000"
+split = "train[800:900]"
+column = "prompt"

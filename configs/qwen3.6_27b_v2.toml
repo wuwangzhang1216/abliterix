@@ -1,0 +1,143 @@
+# Qwen3.6-27B V2 — separate GDN from full-attention steering knobs.
+# Target hardware: 1× RTX Pro 6000 96GB (Blackwell sm_120), BF16.
+#
+# V1 plateau analysis (configs/qwen3.6_27b.toml, shipped ship-score 27/100 @
+# trial 6, then 23 trials couldn't improve):
+#
+#   abliterix registers BOTH `layer.self_attn.o_proj` (16 full-attn layers)
+#   AND `layer.linear_attn.out_proj` (48 GDN layers) under the SAME
+#   "attn.o_proj" component name. See src/abliterix/core/engine.py:772,789.
+#
+#   Result: one SteeringProfile (single max_weight + decay kernel) drives
+#   steering for both module types. GDN output-projection and standard
+#   attention output-projection are semantically different — the gated
+#   delta-net path amplifies small perturbations through its state×gate
+#   dynamics, while a raw attn.o_proj LoRA needs much bigger updates to
+#   move the residual stream. One knob can't satisfy both.
+#
+# V2 fix — requires a one-line engine.py patch (launch script handles it):
+#   engine.py:789
+#     BEFORE: _register("attn.o_proj", layer.linear_attn.out_proj)
+#     AFTER : _register("linear_attn.out_proj", layer.linear_attn.out_proj)
+#
+# Result: optimizer now sees THREE independent knobs:
+#   - attn.o_proj          → 16 full-attention layers (was one of two bucket sources)
+#   - linear_attn.out_proj → 48 GDN layers (separated, was hidden behind attn.o_proj)
+#   - mlp.down_proj        → all 64 layers (unchanged)
+#
+# Per-component strength ranges — rationale informed by V1 trial data:
+#
+# V1 best = trial 25 (16/100 refusals, KL=0.0181):
+#   o=5.17 (near unified bucket's 6.0 ceiling), peak@layer41,
+#   min_weight=3.21 (whole-stack maintained strong steering),
+#   mlp=1.08 (nearly DISABLED — the mlp knob contributed almost nothing)
+# V1 failed = trial 26 (98/100 refusals despite KL=0.0217):
+#   o=1.93 (weak), mlp=4.28 (strong) → mlp perturbation displaced the
+#   model WITHOUT cancelling refusal. Proves mlp.down_proj is noise, not
+#   signal, for refusal ablation on Qwen3.6 hybrid dense.
+#
+# V2 design:
+#   attn.o_proj (16 full-attn): THE lever. Wide range [1.0, 8.0] — in V1
+#     the winning strength 5.17 came from a bucket diluted across 64
+#     layers. With only 16 now, per-module effect should be 4× stronger
+#     for the same nominal weight, so cap at 8.0 (not higher).
+#   linear_attn.out_proj (48 GDN): V1 trial 25's success came from the
+#     unified bucket at min_weight=3.21 on ALL 64 layers — so GDN out_proj
+#     was effectively steered at ~3–5. Give [1.5, 6.0] as a prior.
+#   mlp.down_proj (64): V1 showed this is near-noise. Keep as a weak
+#     knob [0.3, 2.0] so Optuna can occasionally test it, but the search
+#     space stays concentrated on the two attention-path components.
+
+[model]
+model_id = "Qwen/Qwen3.6-27B"
+dtype_fallback_order = ["bfloat16"]
+quant_method = "none"
+use_torch_compile = false
+device_map = "auto"
+max_memory = {0 = "90GiB"}
+
+[inference]
+batch_size = 0
+# bs=4 confirmed optimal on RTX Pro 6000 Blackwell during V1 auto-batch
+# (bs=8/16 regressed due to GDN kernel fallback on sm_120).
+max_batch_size = 4
+max_gen_tokens = 100
+
+[steering]
+vector_method = "mean"
+decay_kernel = "linear"
+orthogonal_projection = true
+projected_abliteration = true
+winsorize_vectors = true
+winsorize_quantile = 0.995
+weight_normalization = "none"
+
+strength_range = [1.0, 5.0]
+
+# Q/K/V stay disabled in V2 — they only cover 16 full-attn layers, same
+# coverage as the new attn.o_proj bucket. Adding them now would expand
+# the search space 3× and dilute Optuna's already-stretched budget.
+# If V2 still plateaus, V3 can add them.
+disabled_components = ["attn.q_proj", "attn.k_proj", "attn.v_proj"]
+
+[steering.component_strength_ranges]
+# 16 full-attention layers. Primary lever per V1 experimental evidence.
+"attn.o_proj" = [1.0, 8.0]
+
+# 48 GDN layers. V1 trial 25 showed GDN out_proj at decayed min ~3.21
+# worked — give a narrower "already-know-the-sweet-spot" range.
+"linear_attn.out_proj" = [1.5, 6.0]
+
+# Demoted to weak knob: V1 trial 25 picked mlp=1.08 (nearly off) and
+# trial 26 proved that mlp=4.28 actively HURTS refusal ablation.
+"mlp.down_proj" = [0.3, 2.0]
+
+[optimization]
+num_trials = 30
+num_warmup_trials = 10
+checkpoint_dir = "checkpoints_qwen3.6_27b_v2"
+
+[kl]
+scale = 1.0
+token_count = 3
+# V1 best actual KL was 0.0181 (trial 25). Target 0.012 — close to that
+# landing zone so the optimizer's KL penalty doesn't pull us off the
+# winning profile, but still constrains the search.
+target = 0.012
+# V1 trial 26 showed KL=0.0217 with 98 refusals — i.e. KL alone is
+# uninformative without refusal signal. Loosen prune to 2.0 so obvious
+# blowups still die but near-optimal high-KL trials aren't killed.
+prune_threshold = 2.0
+
+[detection]
+llm_judge = true
+llm_judge_model = "google/gemini-3-flash-preview"
+llm_judge_batch_size = 10
+llm_judge_concurrency = 25
+
+[display]
+print_responses = false
+print_residual_geometry = false
+plot_residuals = false
+
+non_interactive = true
+
+[benign_prompts]
+dataset = "datasets/good_1000"
+split = "train[:800]"
+column = "prompt"
+
+[target_prompts]
+dataset = "datasets/harmful_1000"
+split = "train[:800]"
+column = "prompt"
+
+[benign_eval_prompts]
+dataset = "datasets/good_1000"
+split = "train[800:900]"
+column = "prompt"
+
+[target_eval_prompts]
+dataset = "datasets/harmful_1000"
+split = "train[800:900]"
+column = "prompt"

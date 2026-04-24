@@ -79,6 +79,8 @@ Abliterated models uploaded to [Hugging Face](https://huggingface.co/wangzhang):
 | [**Mistral-7B-Instruct-RR-Abliterated**](https://huggingface.co/wangzhang/Mistral-7B-Instruct-RR-Abliterated) ⚔️ | **12/100 (12%)** | **0.042** | 60 | Full LoRA-Δ strip + Direct |
 | [**Llama-3-8B-Instruct-RR-Abliterated**](https://huggingface.co/wangzhang/Llama-3-8B-Instruct-RR-Abliterated) ⚔️ | **1/100 (1%)** | **0.017** | 60 | Full LoRA-Δ strip + Direct |
 | [**Qwen3.6-35B-A3B**](https://huggingface.co/wangzhang/Qwen3.6-35B-A3B-abliterated) | **7/100 (7%)** | **0.0189** | 24 | LoRA + EGA + MoE |
+| [**Qwen3.6-27B-abliterated-v2**](https://huggingface.co/wangzhang/Qwen3.6-27B-abliterated-v2) ([GGUF](https://huggingface.co/wangzhang/Qwen3.6-27B-abliterated-v2-GGUF)) | **10/100 (10%)** | **0.0242** (cumulative) | 30 + 30 | LoRA + manual iterative peel |
+| [Qwen3.6-27B-abliterated](https://huggingface.co/wangzhang/Qwen3.6-27B-abliterated) | 16/100 (16%) | 0.0181 | 30 | LoRA + unified GDN/full-attn bucket |
 | [**gpt-oss-20b**](https://huggingface.co/wangzhang/gpt-oss-20b-abliterated) | **6/100 (6%)** | **0.0098** | 100 | Direct + EGA + Router |
 | [**gpt-oss-120b**](https://huggingface.co/wangzhang/gpt-oss-120b-abliterated) | **26/100 (26%)** | **5.4e-06** | 100 | Direct + EGA + Router + vLLM-TP |
 | [**Gemma-4-E4B**](https://huggingface.co/wangzhang/gemma-4-E4B-it-abliterated) | **7/100 (7%)** | **0.0006** | 100 | Direct + Q/K/V/O |

@@ -1,0 +1,128 @@
+# Qwen3.6-27B V4 — second-pass on V1 shipped weights (manual iterative).
+#
+# Problem: V1 shipped at 16/100 (single-pass unified bucket, KL=0.0181).
+# V2 (GDN/full-attn split) plateaued at 26/100. V3 (wider range + seed 42)
+# converged at 17/100 @ KL 0.0123 — single-pass ceiling for this arch.
+#
+# abliterix native iterative mode hits IndexError when combined with LoRA
+# (steering.py:376: sv_by_device shape (2, hidden) indexed as (n_layers+1,
+# hidden)). Can't fix in config.
+#
+# V4 strategy — MANUAL iterative (DeepRefusal-peel, round 2):
+#
+#   1. Load base = wangzhang/Qwen3.6-27B-abliterated (V1 merged checkpoint).
+#      The model is already partially abliterated. Its remaining refusals
+#      (16/100) live in directions ORTHOGONAL to V1's projection — the
+#      "residual refusal" that one-pass missed.
+#
+#   2. Fresh refusal-direction extraction from this partially-abliterated
+#      model. Because benign ↔ target contrast is computed on the NEW
+#      hidden states (after V1's projection), the extracted direction
+#      captures only the residual. This is exactly what abliterix's
+#      native iterative would do internally — we just drive it manually
+#      by swapping the base model.
+#
+#   3. 30-trial TPE sweep, projecting out the residual direction. Target
+#      sub-10/100 refusals with KL budget ≤ 0.015 on top of V1's 0.018.
+#      Total cumulative KL ≤ 0.035 — well below quality-damage threshold.
+#
+# Expected: V1's 16/100 → 5-10/100 after V4. TrevorS DeepRefusal-peel
+# reports sub-5/100 with this recipe on hardened dense checkpoints.
+
+[model]
+# V1 shipped checkpoint — already partially abliterated. Arch = same as
+# base Qwen3.6-27B (Qwen3_5ForConditionalGeneration, 48 GDN + 16 full-attn).
+model_id = "wangzhang/Qwen3.6-27B-abliterated"
+dtype_fallback_order = ["bfloat16"]
+quant_method = "none"
+use_torch_compile = false
+device_map = "auto"
+# A100 80GB: 54 GB model + ~10 GB for vectors/KV/activations.
+max_memory = {0 = "72GiB"}
+
+[inference]
+batch_size = 0
+max_batch_size = 8
+max_gen_tokens = 100
+
+[steering]
+vector_method = "mean"
+decay_kernel = "linear"
+orthogonal_projection = true
+projected_abliteration = true
+winsorize_vectors = true
+winsorize_quantile = 0.995
+weight_normalization = "none"
+
+# Residual refusal signal is weaker than fresh → smaller strengths work.
+# V1 winner was 5.17 on fresh; residual projection should land around half
+# that. Cap at 5.0 (not 8.0 like V3) to concentrate TPE sampling density
+# in the productive range.
+strength_range = [0.3, 5.0]
+
+disabled_components = ["attn.q_proj", "attn.k_proj", "attn.v_proj"]
+
+[steering.component_strength_ranges]
+# V1 found the sweet spot at attn.o_proj max=5.17 @ L41, min=3.21.
+# Residual round: expect max ~ 2.0-3.5, min ~ 0.5-1.5. Narrow range.
+"attn.o_proj" = [0.3, 5.0]
+# V1 confirmed mlp is weak — keep a permissive-but-low range so TPE can
+# still use it if residual MLP refusal is different.
+"mlp.down_proj" = [0.3, 3.0]
+
+[optimization]
+# 30 trials. With base already at 16/100, signal-to-noise is lower than
+# V1/V3 — most bad trials will still show 16-20/100 (no improvement vs
+# base). TPE needs to find trials that DROP below baseline, not regressions.
+num_trials = 30
+num_warmup_trials = 8
+sampler_seed = 7  # different from V1 (unseeded) and V3 (seed 42)
+checkpoint_dir = "checkpoints_qwen3.6_27b_v4"
+
+[kl]
+scale = 1.0
+token_count = 3
+# Base model (V1) already has KL=0.0181 vs original. V4 should add
+# ≤ 0.015 on top. Target 0.008 keeps each residual step clean.
+target = 0.008
+# Refusal-blind KL prune would kill productive high-KL trials (V1 trial
+# 26 pattern). Keep loose.
+prune_threshold = 3.0
+
+[detection]
+llm_judge = true
+llm_judge_model = "google/gemini-3-flash-preview"
+llm_judge_batch_size = 10
+llm_judge_concurrency = 25
+
+[iterative]
+# Native iterative still broken (abliterix LoRA+iter IndexError).
+# V4 achieves iterative effect manually via model_id swap.
+enabled = false
+
+[display]
+print_responses = false
+print_residual_geometry = false
+plot_residuals = false
+
+non_interactive = true
+
+[benign_prompts]
+dataset = "datasets/good_1000"
+split = "train[:800]"
+column = "prompt"
+
+[target_prompts]
+dataset = "datasets/harmful_1000"
+split = "train[:800]"
+column = "prompt"
+
+[benign_eval_prompts]
+dataset = "datasets/good_1000"
+split = "train[800:900]"
+column = "prompt"
+
+[target_eval_prompts]
+dataset = "datasets/harmful_1000"
+split = "train[800:900]"
+column = "prompt"

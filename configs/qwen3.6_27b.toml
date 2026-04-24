@@ -1,0 +1,148 @@
+# Qwen3.6-27B (dense, hybrid VLM + GatedDeltaNet + full-attention) steering config
+# Target hardware: 1× RTX Pro 6000 96GB GDDR7 (Blackwell sm_120).
+#
+# Architecture notes:
+#   model_class: Qwen3_5ForConditionalGeneration (same class as Qwen3.5-397B
+#     but DENSE — no MoE) with vision_config present.
+#   64 decoder layers = 48 linear_attention (GatedDeltaNet) + 16 full_attention.
+#   full_attention_interval=4, pattern repeats [GDN, GDN, GDN, full] × 16.
+#   hidden=5120, intermediate=17408, head_dim=256, GQA 24 Q / 4 KV.
+#   mtp_num_hidden_layers=1 (auxiliary multi-token-prediction head — untouched
+#     by steering; abliterix iterates model.language_model.layers only).
+#   BF16 weights ≈ 54 GB (27B × 2 bytes) → fits 1× RTX Pro 6000 (96 GB) with
+#     ~40 GB headroom for KV cache, activations, vision tower, optimizer state.
+#
+# Recipe rationale (derived from Qwen3.5-27B ship + Qwen3.6-35B-A3B V4 lessons):
+#
+#   - attn.o_proj covers ALL 64 layers. abliterix's steerable_modules()
+#     registers BOTH layer.linear_attn.out_proj (GDN, 48 layers) and
+#     layer.self_attn.o_proj (full-attn, 16 layers) under the SAME
+#     "attn.o_proj" key. So a single EGA knob on o_proj is amortised across
+#     every layer — justifies a wider strength range.
+#
+#   - Q/K/V only exist on the 16 full-attention layers (25% of the stack).
+#     The Qwen3.5-397B hybrid-GDN session confirmed these contribute weak
+#     signal; concentrating strength budget on components that cover all
+#     64 layers (attn.o_proj, mlp.down_proj) beats letting the optimiser
+#     waste trials on attention Q/K/V that only reach 1/4 of the stack.
+#
+#   - mlp.down_proj: every layer has a standard MLP — the main lever.
+#
+#   - projected_abliteration + winsorize_vectors: grimjim recipe that closed
+#     the V3→V4 gap on sister Qwen3.6-35B-A3B (7/100 → target 3/200 refusals).
+#     Preserves helpfulness-aligned signal and damps a few outlier residuals
+#     that can skew the mean-direction estimate.
+#
+# Shape-guard sanity check (verify on-pod before the full sweep — see the
+# deploy script's Step 5c):
+#   src/abliterix/core/steering.py drops modules where W.shape[0] != hidden.
+#   For GDN, nn.Linear(num_v_heads*head_dim=6144 → hidden=5120) gives
+#   weight.shape = (5120, 6144) → PASSES the guard. If your transformers
+#   build orients it as (6144, 5120) the guard skips these layers and EGA
+#   falls back to the 16 full-attn o_proj + 64 mlp.down_proj layers (still
+#   viable, just a smaller search space). The deploy script prints one
+#   layer's shape so you can spot this before burning hours of compute.
+
+[model]
+model_id = "Qwen/Qwen3.6-27B"
+dtype_fallback_order = ["bfloat16"]
+quant_method = "none"
+use_torch_compile = false
+device_map = "auto"
+# 96 GB card, leave ~6 GB for KV cache + activations + vision tower weights
+# + driver overhead. 27B BF16 + GDN conv1d state + small vision tower ≈ 60 GB.
+max_memory = {0 = "90GiB"}
+
+[inference]
+batch_size = 0
+# 27B BF16 + GDN state + GQA(4 KV heads) leaves huge activation budget in
+# 96 GB. First pod run showed bs=4 used only 54 GB total → 43 GB free. Let
+# the auto-batch search sweep up to 16 and pick the highest that fits; on
+# this pod bs=1/2/4 scaled near-linearly (9/16/30 tok/s), so bs=16 should
+# land near 80 tok/s and cut each trial's gen time ~3×.
+max_batch_size = 16
+# Baseline Qwen3.6 mean response length is short; 100 tokens covers >60% of
+# responses and refusal patterns land in the first 30 tokens so the judge
+# still classifies correctly on truncation.
+max_gen_tokens = 100
+
+[steering]
+vector_method = "mean"
+decay_kernel = "linear"
+orthogonal_projection = true
+# grimjim 2025: only remove the orthogonal component of refusal direction
+# relative to the harmless mean. Preserves helpfulness-aligned signal.
+projected_abliteration = true
+# Symmetric winsorisation @ 0.995 quantile damps outlier residual vectors
+# before projection (a handful of harmful prompts can have huge norms that
+# skew the mean-direction estimate).
+winsorize_vectors = true
+winsorize_quantile = 0.995
+weight_normalization = "none"
+
+# Global fallback — used only if a component lacks a per-component override.
+strength_range = [1.0, 5.0]
+
+# Q/K/V live on only 16/64 layers. Concentrating the strength budget on
+# components that span all 64 layers yields cleaner residual surgery.
+disabled_components = ["attn.q_proj", "attn.k_proj", "attn.v_proj"]
+
+[steering.component_strength_ranges]
+# Spans GDN out_proj (48 layers) + full-attn o_proj (16 layers) = every layer.
+# Widen to [1.0, 6.0] so the optimiser can push harder without overflowing
+# the lone dense knob.
+"attn.o_proj" = [1.0, 6.0]
+# Standard MLP on every layer — sister Qwen3.5-27B dense shipped with
+# [1.0, 5.0] global and this matches the proven envelope.
+"mlp.down_proj" = [1.0, 5.0]
+
+[optimization]
+# 30 trials: Qwen3.5-27B dense shipped at 25. Extra 5 trials buffer the
+# hybrid-GDN search space (one more component to tune via projection).
+num_trials = 30
+num_warmup_trials = 10
+checkpoint_dir = "checkpoints_qwen3.6_27b"
+
+[kl]
+scale = 1.0
+token_count = 3
+# Tight target — the projected+winsorised recipe typically settles well
+# under 0.01 on Qwen dense; 0.005 keeps the optimiser from drifting into
+# high-KL noisy regions.
+target = 0.005
+# 100× the target — permissive enough to let promising trials finish,
+# strict enough to prune obviously divergent ones before judge calls.
+prune_threshold = 0.5
+
+[detection]
+llm_judge = true
+llm_judge_model = "google/gemini-3-flash-preview"
+llm_judge_batch_size = 10
+llm_judge_concurrency = 25
+
+[display]
+print_responses = false
+print_residual_geometry = false
+plot_residuals = false
+
+non_interactive = true
+
+[benign_prompts]
+dataset = "datasets/good_1000"
+split = "train[:800]"
+column = "prompt"
+
+[target_prompts]
+dataset = "datasets/harmful_1000"
+split = "train[:800]"
+column = "prompt"
+
+[benign_eval_prompts]
+dataset = "datasets/good_1000"
+split = "train[800:900]"
+column = "prompt"
+
+[target_eval_prompts]
+dataset = "datasets/harmful_1000"
+split = "train[800:900]"
+column = "prompt"
