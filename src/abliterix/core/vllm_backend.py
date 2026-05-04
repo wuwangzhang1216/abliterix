@@ -47,8 +47,88 @@ from ..types import ChatMessage
 from ..util import print
 
 
-# Minimum LoRA rank supported by vLLM.
-_VLLM_MIN_RANK = 8
+# Default LoRA rank to declare to vLLM when the user has not pinned
+# ``vllm_max_lora_rank`` in their recipe. vLLM 0.20.x's own default for
+# ``LoRAConfig.max_lora_rank`` is 16, so we mirror it here. Adapters with
+# rank < this value are zero-padded by ``_serialize_adapter`` so vLLM
+# accepts them; adapters with rank > this value would require the user to
+# bump ``vllm_max_lora_rank``.
+_DEFAULT_VLLM_MAX_LORA_RANK = 16
+
+# MLA-bearing model architecture name fragments. When the model's HF
+# ``config.architectures`` contains any of these substrings, we pick an
+# MLA-aware attention backend (``FLASH_ATTN_MLA``) instead of the
+# non-MLA defaults — vLLM 0.20.x rejects ``TRITON_ATTN`` on MLA models.
+_MLA_ARCH_FRAGMENTS: tuple[str, ...] = (
+    "DeepseekV2",
+    "DeepseekV3",
+    "DeepseekV4",
+    "MiniMaxM2",  # MiniMax-M2.5, M2.7
+    "MiniMaxText",
+)
+
+# Architecture name fragments for sink-attention models (gpt-oss family).
+# vLLM rejects ``FLASH_ATTN`` on these ("attention sinks not supported")
+# but ``TRITON_ATTN`` works.
+_SINK_ATTENTION_ARCH_FRAGMENTS: tuple[str, ...] = (
+    "GptOss",  # gpt-oss-20b / 120b
+)
+
+
+def _detect_arch_family(model_id: str, trust_remote_code: bool) -> str:
+    """Return the first architecture name from the model's HF config, or
+    an empty string if the config can't be loaded."""
+    try:
+        from transformers import AutoConfig
+
+        cfg = AutoConfig.from_pretrained(model_id, trust_remote_code=trust_remote_code)
+    except Exception:
+        return ""
+    archs = getattr(cfg, "architectures", None) or []
+    return archs[0] if archs else ""
+
+
+def _resolve_attention_backend(
+    config_override: str | None, model_arch: str
+) -> str | None:
+    """Pick the vLLM attention_config backend.
+
+    - User-set ``attention_backend`` in the recipe always wins.
+    - MLA models (DeepSeek-V2/V3, MiniMax-M2.x) get ``FLASH_ATTN_MLA``
+      because the non-MLA names are rejected at engine init.
+    - Sink-attention models (gpt-oss) keep ``TRITON_ATTN`` — ``FLASH_ATTN``
+      explicitly errors with "attention sinks not supported".
+    - Everything else returns None so vLLM applies its own default
+      (``FLASH_ATTN`` on Hopper, etc.).
+    """
+    if config_override is not None:
+        return config_override
+    for frag in _MLA_ARCH_FRAGMENTS:
+        if frag in model_arch:
+            return "FLASH_ATTN_MLA"
+    for frag in _SINK_ATTENTION_ARCH_FRAGMENTS:
+        if frag in model_arch:
+            return "TRITON_ATTN"
+    return None
+
+
+def _should_disable_custom_all_reduce(config_override: bool | None) -> bool:
+    """Auto-detect when vLLM's custom all-reduce path needs to be disabled.
+
+    Returns True only on Blackwell PCIe (sm_120) where the path is known to
+    deadlock during worker init without NVLink.  User-set value always wins.
+    """
+    if config_override is not None:
+        return config_override
+    if not torch.cuda.is_available():
+        return False
+    try:
+        major, minor = torch.cuda.get_device_capability(0)
+    except Exception:
+        return False
+    # sm_120 is Blackwell PCIe (RTX PRO 6000). sm_100 is Blackwell SXM
+    # (B100/B200) which has NVLink and does not need the workaround.
+    return (major, minor) == (12, 0)
 
 
 class VLLMGenerator:
@@ -60,7 +140,29 @@ class VLLMGenerator:
     """
 
     def __init__(self, config: AbliterixConfig):
-        from .vllm_compat import install_gemma4_transformers_compat
+        from . import vllm_compilation_config
+        from .vllm_compat import (
+            check_vllm_version,
+            ensure_vllm_env,
+            install_gemma4_transformers_compat,
+        )
+
+        # Refuse to start against an unsupported vLLM version. abliterix's
+        # current floor is 0.18 because `VLLM_ALLOW_INSECURE_SERIALIZATION`
+        # (PR #35928) is required for the collective_rpc path.
+        check_vllm_version()
+
+        # Auto-set the small set of vLLM env vars needed for in-place
+        # editing / collective_rpc. Idempotent and never overwrites a
+        # user-set value.
+        needs_rpc = bool(config.model.use_in_place_editing)
+        written_env = ensure_vllm_env(needs_collective_rpc=needs_rpc)
+        if written_env:
+            print(
+                "  [dim]vLLM env (auto-set): "
+                + ", ".join(f"{k}={v}" for k, v in written_env.items())
+                + "[/]"
+            )
 
         install_gemma4_transformers_compat()
 
@@ -76,45 +178,77 @@ class VLLMGenerator:
         model_id = config.model.model_id
         trust = config.model.trust_remote_code or False
 
+        # Architecture sniff drives the MLA-aware attention backend choice
+        # below. Cached so we only hit the HF config once.
+        model_arch = _detect_arch_family(model_id, trust)
+
         print(f"* Loading model in vLLM with TP={tp}...")
 
         self._lora_disabled = bool(config.model.disable_lora)
+        # vLLM's max_lora_rank governs every adapter loaded by this engine;
+        # adapters with rank < this value get zero-padded inside
+        # _serialize_adapter. Fall back to vLLM's own default (16) when the
+        # user has not pinned a value.
+        self._lora_max_rank = (
+            config.model.vllm_max_lora_rank or _DEFAULT_VLLM_MAX_LORA_RANK
+        )
+
+        # Resolve the attention backend: user override → MLA-aware
+        # auto-detect → vLLM default. None means "let vLLM pick".
+        attention_backend = _resolve_attention_backend(
+            config.model.attention_backend, model_arch
+        )
+
+        # Build the compilation_config dict via the dedicated module so the
+        # rest of the file does not depend on vLLM 0.20.x internals.
+        # ``vllm_compile_mode`` is the abliterix-level intent; the dict
+        # shape is hidden in vllm_compilation_config.build().
+        compile_mode = config.model.vllm_compile_mode
+        # The 'eager' mode keeps backwards-compat with the old
+        # enforce_eager=True path; everything else needs MoE layer indices
+        # which we don't know until the model is loaded — for now expose
+        # eager + full_compile here and route moe_eager_rest_compile
+        # through the post-load attach (future work, tracked in PRD #20
+        # Out of Scope).
+        if compile_mode == "moe_eager_rest_compile":
+            print(
+                "  [yellow]vllm_compile_mode='moe_eager_rest_compile' is not "
+                "yet wired through pre-load — falling back to 'eager' "
+                "(see PRD #20 Out of Scope).[/]"
+            )
+            compile_mode = "eager"
+        compilation_config = vllm_compilation_config.build(compile_mode)
 
         kwargs: dict[str, Any] = dict(
             model=model_id,
             tensor_parallel_size=tp,
             gpu_memory_utilization=config.model.gpu_memory_utilization,
             trust_remote_code=trust,
+            # enforce_eager kept for backwards-compat with recipes that set
+            # it explicitly. compilation_config above also encodes the
+            # eager/non-eager intent; vLLM honours the more restrictive of
+            # the two.
             enforce_eager=config.model.enforce_eager,
             enable_expert_parallel=config.model.enable_expert_parallel,
+            # MoE compute backend. Default 'triton' avoids the FlashInfer
+            # cutlass per-expert-group JIT compile that costs ~30 minutes
+            # on first sm_90 cold start. Recipes that want the cutlass
+            # perf can override via ``moe_backend = "flashinfer_cutlass"``.
+            moe_backend=config.model.moe_backend,
             # generate_and_score requests logprobs=100 to build a sparse KL
             # distribution that covers >99.9% of the probability mass.  vLLM
             # V1 caps sampler logprobs at 20 by default; lift it explicitly
             # so the KL computation keeps its top-100 tail.
             max_logprobs=100,
-            # Force TRITON_ATTN attention backend — bypasses FlashInfer entirely
-            # (FlashInfer has an API mismatch on trtllm_paged_attention_decode:
-            # 24 vs 27 args).  TRITON_ATTN is the only backend that also works
-            # for models with attention sinks (e.g. gpt-oss) which FLASH_ATTN
-            # explicitly rejects ("attention sinks not supported").
-            attention_config={"backend": "TRITON_ATTN"},
-            # Force language-model-only: drops vision/audio tower weights so
-            # Punica LoRA wrapper can handle hybrid VLM/MoE architectures
-            # (Qwen3.5MoeForConditionalGeneration, Llama-4, Step3, Mistral-3).
-            # Without this, vLLM worker fails to start with "no matching
-            # PunicaWrapper" on visual.* modules. Harmless for pure text
-            # models — the unused modality keys are silently ignored.
-            limit_mm_per_prompt={"image": 0, "video": 0, "audio": 0},
-            # Disable vLLM custom all-reduce kernel. On Blackwell PCIe GPUs
-            # (RTX PRO 6000, sm_120) without NVLink, the custom-AR path deadlocks
-            # during worker init — NCCL connects successfully but the engine
-            # never advances to weight loading (workers spin at 100% CPU / idle
-            # GPU indefinitely). See vllm issue #33041 and forum post "vLLM
-            # hangs during worker initialization on Blackwell PCIe GPUs unless
-            # --disable-custom-all-reduce is used". Harmless on NVLink hardware
-            # (NCCL AllReduce remains efficient); small perf loss on PCIe but
-            # necessary to make the run progress at all.
-            disable_custom_all_reduce=True,
+            # vLLM 0.20.x compilation_config: see vllm_compilation_config.py.
+            compilation_config=compilation_config,
+            # Disable vLLM custom all-reduce only when the GPU+topology
+            # actually needs it (Blackwell PCIe sm_120 deadlock). On
+            # NVLink Hopper/SXM Blackwell, leaving it on preserves the
+            # documented perf win.
+            disable_custom_all_reduce=_should_disable_custom_all_reduce(
+                config.model.disable_custom_all_reduce
+            ),
             # NOTE: chunked_prefill is always ON in vLLM V1 (>= 0.8) and
             # cannot be disabled.  We don't pass enable_chunked_prefill.
             # Disable prefix caching when in-place editors are active.  Even
@@ -126,13 +260,32 @@ class VLLMGenerator:
             # (the 100 benign prompts share no prefix anyway).
             enable_prefix_caching=not bool(config.model.use_in_place_editing),
         )
+
+        # attention_config only goes in when we actually want to override
+        # vLLM's per-arch default.
+        if attention_backend is not None:
+            kwargs["attention_config"] = {"backend": attention_backend}
+
+        # limit_mm_per_prompt: pass-through. Default keeps the historical
+        # "drop vision/audio towers" behaviour so Punica LoRA wrapper
+        # accepts hybrid VLM/MoE architectures; recipes that want
+        # multimodal active can set this explicitly.
+        kwargs["limit_mm_per_prompt"] = config.model.limit_mm_per_prompt or {
+            "image": 0,
+            "video": 0,
+            "audio": 0,
+        }
+
         if not self._lora_disabled:
             kwargs.update(
                 enable_lora=True,
-                max_lora_rank=_VLLM_MIN_RANK,
-                max_loras=1,
-                max_cpu_loras=2,
+                max_lora_rank=self._lora_max_rank,
+                max_loras=config.model.vllm_max_loras,
+                # max_cpu_loras must be >= max_loras per LoRAConfig.validate.
+                max_cpu_loras=max(config.model.vllm_max_loras + 1, 2),
             )
+            if config.model.lora_target_modules:
+                kwargs["lora_target_modules"] = list(config.model.lora_target_modules)
         if config.model.max_model_len is not None:
             kwargs["max_model_len"] = config.model.max_model_len
         if config.model.max_num_seqs is not None:
@@ -501,13 +654,17 @@ class VLLMGenerator:
 
         # Build state dict with PEFT naming convention.
         state_dict: dict[str, Tensor] = {}
+        target_rank = self._lora_max_rank
         for module_path, (lora_a, lora_b) in lora_weights.items():
-            # Pad rank-1 to rank-8 for vLLM compatibility.
+            # vLLM pins every adapter to the engine's max_lora_rank; pad
+            # smaller adapters with zeros so they fit. Recipes that want
+            # the rank passed through honestly should set
+            # ``vllm_max_lora_rank = <actual_rank>`` in the model config.
             rank = lora_a.shape[0]
-            if rank < _VLLM_MIN_RANK:
-                pad = _VLLM_MIN_RANK - rank
-                lora_a = F.pad(lora_a, (0, 0, 0, pad))  # (8, d_in)
-                lora_b = F.pad(lora_b, (0, pad, 0, 0))  # (d_out, 8)
+            if rank < target_rank:
+                pad = target_rank - rank
+                lora_a = F.pad(lora_a, (0, 0, 0, pad))
+                lora_b = F.pad(lora_b, (0, pad, 0, 0))
 
             peft_key = f"base_model.model.{module_path}"
             # Cast to bf16: vLLM nightly (0.19.2rc1+) asserts
@@ -526,8 +683,8 @@ class VLLMGenerator:
         adapter_config = {
             "peft_type": "LORA",
             "base_model_name_or_path": base_model_id,
-            "r": _VLLM_MIN_RANK,
-            "lora_alpha": _VLLM_MIN_RANK,  # alpha == r → scaling = 1.0
+            "r": target_rank,
+            "lora_alpha": target_rank,  # alpha == r → scaling = 1.0
             "target_modules": target_modules,
             "lora_dropout": 0.0,
             "bias": "none",

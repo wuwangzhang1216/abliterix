@@ -191,3 +191,131 @@ the README explicitly from the prior model card style and include:
 - judge model
 - safe over-refusal probe JSON
 - continuation-NLL KL mode for vLLM in-place runs
+
+## vLLM 0.18 — 0.20.x Integration Knobs
+
+PRD #20 added a small set of `[model]` config fields for the modernised
+vLLM backend. abliterix now refuses to start against `vllm < 0.18` (the
+`VLLM_ALLOW_INSECURE_SERIALIZATION` flag MoE editing depends on landed in
+that version) and warns on `>= 0.21` until smoke-tested.
+
+### Auto-set environment variables
+
+`VLLMGenerator.__init__` calls `vllm_compat.ensure_vllm_env()` to set the
+small set of env vars vLLM 0.20.x needs, **without overriding any value
+the user has already exported**:
+
+| Env var | When set | Reason |
+|---|---|---|
+| `FLASHINFER_DISABLE_VERSION_CHECK=1` | Always | Skips a noisy assertion when transformers gets bumped underneath flashinfer |
+| `VLLM_ALLOW_INSECURE_SERIALIZATION=1` | Only when `use_in_place_editing = true` | Required for `collective_rpc` to pickle Python callables sent to TP workers |
+
+The deprecated `VLLM_FUSED_MOE_UNQUANTIZED_BACKEND=triton` is **no longer
+set** — vLLM 0.20.x logs `Unknown vLLM environment variable detected` for
+this name. Use the `moe_backend` config field instead (see below).
+
+### Attention backend (MLA-aware)
+
+```toml
+[model]
+attention_backend = "FLASH_ATTN_MLA"  # or omit for auto-detect
+```
+
+When `attention_backend = None` (default), abliterix sniffs the model's
+HF architecture and picks:
+
+- `FLASH_ATTN_MLA` for MLA models (DeepSeek-V2/V3, MiniMax-M2.x).
+- `TRITON_ATTN` for sink-attention models (gpt-oss).
+- `None` (let vLLM choose) for everything else.
+
+The previous hardcoded `TRITON_ATTN` is gone — it crashed engine init on
+every MLA model. Override only when you have a specific reason.
+
+### MoE backend (default `triton`)
+
+```toml
+[model]
+moe_backend = "triton"  # default; skips FlashInfer cutlass JIT cold start
+```
+
+vLLM 0.20.x's default `moe_backend = "auto"` selects FlashInfer CUTLASS
+on sm_90 and JIT-compiles a kernel per expert-group count (M128_group1..N).
+On a 64-expert model that is **30+ minutes** of pod time on first run.
+abliterix defaults to `"triton"` to skip this entirely.
+
+Override if you want the FlashInfer perf and have already paid the JIT:
+
+```toml
+moe_backend = "flashinfer_cutlass"
+```
+
+Other options: `auto`, `deep_gemm`, `cutlass`, `flashinfer_trtllm`,
+`marlin`, `aiter`.
+
+### Compilation mode (PRD #20 partial — eager wired, MoE-eager-rest deferred)
+
+```toml
+[model]
+vllm_compile_mode = "eager"  # default; equivalent to enforce_eager=true
+```
+
+Three abliterix-level intents map onto vLLM's `compilation_config` dict:
+
+- `"eager"` — every CUDA graph off; all forward hooks fire. Safest for MoE
+  router suppression and expert editing. Current default.
+- `"moe_eager_rest_compile"` — non-MoE layers get CUDA graph capture;
+  MoE layers stay eager so hooks survive. Needs GPU smoke before promotion;
+  currently falls back to `"eager"` with a warning.
+- `"full_compile"` — full vLLM compile + CUDA graph capture everywhere.
+  No MoE editing supported (PyTorch issue #117758 silently drops
+  post-compile hooks). Dense models only.
+
+### LoRA pool / target modules
+
+```toml
+[model]
+vllm_max_loras = 1            # adapter slots in CPU; raise to pool trial adapters
+vllm_max_lora_rank = 16       # default 16 (vLLM's own default in 0.20.x)
+lora_target_modules = ["o_proj", "qkv_proj"]  # restrict LoRA to non-MoE
+```
+
+`vllm_max_lora_rank` defaults to vLLM's own default (16). The prior
+hardcoded floor of 8 is gone — set this to the actual rank you plan to
+use for the cleanest KL signal (no zero-padded dimensions polluting the
+direction).
+
+`lora_target_modules` maps to vLLM's `--lora-target-modules` (PR #34984,
+v0.19.0+). Mainly a perf knob; experimentally also a possible workaround
+for the LoRA + Expert Parallel worker assertion crash (verify on your
+hardware before relying on it — see PRD #20 Out of Scope).
+
+### Custom-all-reduce auto-detect
+
+```toml
+[model]
+disable_custom_all_reduce = true  # or false; or omit for auto-detect
+```
+
+When unset, abliterix looks at `torch.cuda.get_device_capability(0)` and
+disables custom all-reduce **only on Blackwell PCIe (sm_120)** where the
+path is known to deadlock without NVLink (RTX PRO 6000). H100 / B100 /
+B200 SXM keep the custom path on for the documented perf win.
+
+### Multimodal limit pass-through
+
+```toml
+[model]
+limit_mm_per_prompt = { image = 0, video = 0, audio = 0 }  # default
+```
+
+Defaults preserve the historical "drop vision/audio towers" behaviour so
+the Punica LoRA wrapper accepts hybrid VLM/MoE architectures without
+crashing on `visual.*` modules. Set explicitly when you want vision /
+audio active for a multimodal abliteration recipe.
+
+### Hidden-state extraction escape hatch
+
+`AX_DISABLE_VLLM_HS=1` in the environment forces abliterix's Phase 1
+hidden-state extraction to use HuggingFace even when the backend is
+`vllm`. Useful when speculators-based vLLM hidden states are unreliable
+for a model architecture (e.g. Gemma 4 31B).

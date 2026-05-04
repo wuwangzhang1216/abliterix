@@ -51,7 +51,11 @@ ui = [
     "plotly~=6.1",
 ]
 vllm = [
-    "vllm>=0.8",
+    # Floor pinned to >=0.18 because abliterix's MoE/expert editors require
+    # `VLLM_ALLOW_INSECURE_SERIALIZATION` (PR #35928, v0.18.0) for
+    # `collective_rpc` callable pickling. Upper bound is the next minor we
+    # have not yet smoke-tested; bump after a green CI run.
+    "vllm>=0.18,<0.21",
     "speculators>=0.1.9",
 ]
 # sglang extra removed from pyproject.toml due to dependency conflict

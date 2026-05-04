@@ -2,11 +2,135 @@
 #
 # SPDX-License-Identifier: AGPL-3.0-or-later
 
-"""Compatibility helpers for model families that vLLM supports before HF does."""
+"""Compatibility helpers for vLLM version gating, env-var setup, and model
+families that vLLM supports before HF does."""
 
 from __future__ import annotations
 
+import os
+import warnings
 from typing import Any
+
+# vLLM versions abliterix is tested against. Lower bound is v0.18 because
+# `VLLM_ALLOW_INSECURE_SERIALIZATION` (PR #35928) is required for the
+# `collective_rpc` path that VLLMMoEEditor depends on. Upper bound is the
+# next minor we have not yet exercised; bump after a passing CI run on the
+# new minor.
+_MIN_VLLM = (0, 18, 0)
+_MAX_VLLM_EXCLUSIVE = (0, 21, 0)
+
+# Env vars VLLMGenerator sets before constructing LLM(). Each is a no-op when
+# the user has already exported a value; we never override.
+_REQUIRED_ENV_BASE: tuple[tuple[str, str], ...] = (
+    # Skips a noisy version assertion in flashinfer when transformers gets
+    # bumped underneath it; vLLM's own version pin is already authoritative.
+    ("FLASHINFER_DISABLE_VERSION_CHECK", "1"),
+)
+_REQUIRED_ENV_RPC: tuple[tuple[str, str], ...] = (
+    # Required for collective_rpc to pickle Python callables sent to TP
+    # workers. Introduced in vLLM v0.18 (PR #35928). Without this, MoE
+    # router suppression and in-place expert editing silently no-op.
+    ("VLLM_ALLOW_INSECURE_SERIALIZATION", "1"),
+)
+
+
+def _parse_version(spec: str) -> tuple[int, ...]:
+    """Parse a vLLM version string into a comparable tuple. Handles dev/rc
+    suffixes by taking the leading numeric prefix only."""
+    head = spec.split("+", 1)[0]
+    parts: list[int] = []
+    for chunk in head.split("."):
+        digits = ""
+        for c in chunk:
+            if c.isdigit():
+                digits += c
+            else:
+                break
+        if not digits:
+            break
+        parts.append(int(digits))
+    return tuple(parts) if parts else (0,)
+
+
+def check_vllm_version(installed: str | None = None) -> tuple[int, ...]:
+    """Validate that the installed vLLM version is in the supported window.
+
+    Parameters
+    ----------
+    installed
+        Version string. When None, queried from
+        ``importlib.metadata.version("vllm")``.
+
+    Returns
+    -------
+    tuple[int, ...]
+        The parsed (major, minor, patch) version tuple.
+
+    Raises
+    ------
+    ImportError
+        If vLLM is not installed, or the installed version is below the
+        supported floor (currently 0.18.0). The PRD bumped abliterix's
+        floor to v0.18 because earlier versions lack the
+        `VLLM_ALLOW_INSECURE_SERIALIZATION` flag that
+        :class:`VLLMMoEEditor` requires.
+    """
+    if installed is None:
+        try:
+            from importlib.metadata import PackageNotFoundError, version
+
+            installed = version("vllm")
+        except PackageNotFoundError as exc:
+            raise ImportError(
+                'vLLM is not installed. Install with `pip install "vllm>=0.18,<0.21"`.'
+            ) from exc
+
+    parsed = _parse_version(installed)
+    if parsed < _MIN_VLLM:
+        raise ImportError(
+            f"abliterix requires vllm>={'.'.join(str(p) for p in _MIN_VLLM)}, "
+            f'got {installed}. Upgrade with `pip install -U "vllm>=0.18,<0.21"`.'
+        )
+    if parsed >= _MAX_VLLM_EXCLUSIVE:
+        warnings.warn(
+            f"vLLM {installed} is newer than the highest version abliterix has been "
+            f"validated against ({'.'.join(str(p) for p in _MAX_VLLM_EXCLUSIVE)}). "
+            "Run smoke tests before relying on this combination in production.",
+            stacklevel=2,
+        )
+    return parsed
+
+
+def ensure_vllm_env(
+    *,
+    needs_collective_rpc: bool = False,
+    env: dict[str, str] | None = None,
+) -> dict[str, str]:
+    """Set the small set of env vars vLLM needs before LLM() construction.
+
+    Idempotent and non-destructive: never overwrites a value the user has
+    already exported. Returns a dict of the names+values that this call
+    actually wrote, suitable for logging.
+
+    Parameters
+    ----------
+    needs_collective_rpc
+        When True, also sets `VLLM_ALLOW_INSECURE_SERIALIZATION=1`. This is
+        required whenever VLLMMoEEditor / VLLMExpertEditor / use_in_place_editing
+        is active so `collective_rpc` can pickle Python callables.
+    env
+        Mutable mapping treated as the environment. Defaults to `os.environ`.
+    """
+    target = env if env is not None else os.environ
+    written: dict[str, str] = {}
+    pairs = list(_REQUIRED_ENV_BASE)
+    if needs_collective_rpc:
+        pairs.extend(_REQUIRED_ENV_RPC)
+    for name, value in pairs:
+        if name not in target:
+            target[name] = value
+            written[name] = value
+    return written
 
 
 def install_gemma4_transformers_compat() -> None:
