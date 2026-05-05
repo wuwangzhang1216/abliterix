@@ -260,6 +260,180 @@ def test_plan_survives_dtype_cast():
 
 
 # ===================================================================
+# profile_safety_experts_vllm — driver-side aggregation of vLLM's
+# enable_return_routed_experts arrays (issue #22 / PR #24).
+#
+# We mock the LLM with a fake whose .generate(prompts, ...) returns a
+# canned list of RequestOutput-like objects carrying preset routed_experts
+# numpy arrays. The aggregation logic, dense-layer skipping, and risk
+# scoring are tested without touching vLLM.
+# ===================================================================
+
+import sys as _sys  # noqa: E402
+
+import numpy as np  # noqa: E402
+
+# Stub ``vllm.SamplingParams`` so the profiler's import succeeds without
+# the real vLLM package. The fake generate() ignores the params object
+# anyway — we only need the import to resolve.
+if "vllm" not in _sys.modules:
+    _vllm_stub = types.ModuleType("vllm")
+    _vllm_stub.SamplingParams = lambda **kwargs: kwargs  # type: ignore[attr-defined]
+    _sys.modules["vllm"] = _vllm_stub
+
+from abliterix.core.vllm_moe_editor import (  # noqa: E402
+    profile_safety_experts_vllm,
+)
+
+
+class _FakeCompletion:
+    def __init__(self, routed_experts: np.ndarray):
+        self.routed_experts = routed_experts
+
+
+class _FakeRequestOutput:
+    def __init__(self, routed_experts: np.ndarray):
+        self.outputs = [_FakeCompletion(routed_experts)]
+
+
+class _FakeTokenizer:
+    def apply_chat_template(self, chat, **kwargs):  # noqa: ARG002
+        # Profiler doesn't actually use the formatted prompts — the fake
+        # LLM ignores them — but it does iterate the result, so return a
+        # string per chat.
+        return chat[-1]["content"]
+
+
+class _FakeMessage:
+    def __init__(self, user: str):
+        self.user = user
+        self.system = None
+
+
+class _FakeLLM:
+    """Stand-in for vllm.LLM exposing only the methods profile_safety_experts_vllm needs.
+
+    ``benign_arrays`` and ``target_arrays`` are the per-prompt
+    routed_experts arrays returned on each generate() call. The fake
+    flips between the two on alternating calls (matches the production
+    profiler: one benign call, one target call).
+    """
+
+    def __init__(
+        self, benign_arrays: list[np.ndarray], target_arrays: list[np.ndarray]
+    ):
+        self._call = 0
+        self._benign = benign_arrays
+        self._target = target_arrays
+
+    def generate(self, prompts, params, use_tqdm=False):  # noqa: ARG002
+        self._call += 1
+        arrays = self._benign if self._call == 1 else self._target
+        # Repeat / truncate to match prompt count.
+        n = len(prompts)
+        out = []
+        for i in range(n):
+            arr = arrays[i % len(arrays)]
+            out.append(_FakeRequestOutput(arr))
+        return out
+
+
+def test_profile_safety_experts_vllm_aggregates_per_layer_counts():
+    """Issue #22 aggregation: expert id histograms turn into risk scores
+    (target frequency minus benign frequency)."""
+    # 4 prompt tokens, 3 layers (layer 0 dense), top_k=2, 5 experts.
+    # Benign: layer 1 picks experts 0, 1 every token. layer 2 picks 2, 3.
+    benign = np.array(
+        [
+            [[0, 0], [0, 1], [2, 3]],
+            [[0, 0], [0, 1], [2, 3]],
+            [[0, 0], [0, 1], [2, 3]],
+            [[0, 0], [0, 1], [2, 3]],
+        ],
+        dtype=np.int32,
+    )
+    # Target: layer 1 routes everything to expert 4 — that's the safety expert.
+    # Layer 2 stays balanced (no shift).
+    target = np.array(
+        [
+            [[0, 0], [4, 4], [2, 3]],
+            [[0, 0], [4, 4], [2, 3]],
+            [[0, 0], [4, 4], [2, 3]],
+            [[0, 0], [4, 4], [2, 3]],
+        ],
+        dtype=np.int32,
+    )
+    llm = _FakeLLM([benign], [target])
+    safety = profile_safety_experts_vllm(
+        llm,
+        benign_msgs=[_FakeMessage("benign")],
+        target_msgs=[_FakeMessage("target")],
+        tokenizer=_FakeTokenizer(),
+        top_k=2,
+    )
+
+    # Layer 0 was all-zero placeholder → MUST be skipped.
+    assert 0 not in safety, "dense placeholder layer leaked into safety dict"
+
+    # Layer 1: expert 4 dominates target. Score is "selections-per-token"
+    # which can be > 1 when top_k > 1 (here top_k=2, expert 4 fills BOTH
+    # slots every token → 2.0 selections/token in target, 0 in benign).
+    # Same semantics as the legacy hook-based profiler.
+    assert 1 in safety
+    top_eid, top_risk = safety[1][0]
+    assert top_eid == 4
+    assert top_risk == pytest.approx(2.0, abs=1e-6)
+
+    # Layer 2: experts 2 and 3 stay balanced → risk ~ 0.
+    assert 2 in safety
+    assert all(abs(r) < 1e-6 for _, r in safety[2])
+
+
+def test_profile_safety_experts_vllm_handles_missing_routed_experts():
+    """If the LLM returns outputs without routed_experts (kwarg disabled
+    or non-MoE model), the profiler must return {} cleanly."""
+
+    class _NoRoutedLLM:
+        def generate(self, prompts, params, use_tqdm=False):  # noqa: ARG002
+            class _C:
+                routed_experts = None
+
+            class _R:
+                outputs = [_C()]
+
+            return [_R() for _ in prompts]
+
+    safety = profile_safety_experts_vllm(
+        _NoRoutedLLM(),
+        benign_msgs=[_FakeMessage("benign")],
+        target_msgs=[_FakeMessage("target")],
+        tokenizer=_FakeTokenizer(),
+    )
+    assert safety == {}
+
+
+def test_profile_safety_experts_vllm_skips_all_zero_layers():
+    """Every dense layer (all-zero slice) must be omitted from the result,
+    not appear with bogus risk scores."""
+    # Two MoE layers where layer 0 is dense (all zeros) on BOTH benign
+    # and target. Layer 1 has real expert ids.
+    benign = np.zeros((3, 2, 2), dtype=np.int32)
+    benign[:, 1, :] = np.array([[7, 8], [7, 8], [7, 8]])
+    target = np.zeros((3, 2, 2), dtype=np.int32)
+    target[:, 1, :] = np.array([[7, 8], [7, 8], [7, 8]])
+
+    safety = profile_safety_experts_vllm(
+        _FakeLLM([benign], [target]),
+        benign_msgs=[_FakeMessage("a")],
+        target_msgs=[_FakeMessage("b")],
+        tokenizer=_FakeTokenizer(),
+    )
+    assert 0 not in safety
+    assert 1 in safety
+    assert {eid for eid, _ in safety[1]} == {7, 8}
+
+
+# ===================================================================
 # Expert-Granular Abliteration (EGA) via in-place w2_weight edit.
 #
 # These tests emulate vLLM's FusedMoE with a pure-PyTorch stand-in that

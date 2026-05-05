@@ -212,6 +212,15 @@ def _build_llm_kwargs(
         # V1 caps sampler logprobs at 20 by default; lift it explicitly
         # so the KL computation keeps its top-100 tail.
         max_logprobs=100,
+        # Issue #22: read per-token routed expert IDs from RequestOutput
+        # instead of installing forward hooks via collective_rpc. The
+        # profile_safety_experts_vllm function reads
+        # ``output.outputs[0].routed_experts`` (numpy ndarray of shape
+        # ``(tokens, layers, top_k)``) when this is on. Cost is small
+        # (~140 KB per typical request); the win is dropping ~150 LoC of
+        # worker rpc plumbing + one of the two reasons we needed
+        # VLLM_ALLOW_INSECURE_SERIALIZATION.
+        enable_return_routed_experts=config.model.vllm_return_routed_experts,
         # vLLM 0.20.x compilation_config encodes the eager/non-eager
         # intent. ``enforce_eager`` is intentionally NOT passed here —
         # _resolve_compile_mode folds it into ``compile_mode`` above so

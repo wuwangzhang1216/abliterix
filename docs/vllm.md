@@ -270,6 +270,38 @@ Three abliterix-level intents map onto vLLM's `compilation_config` dict:
   No MoE editing supported (PyTorch issue #117758 silently drops
   post-compile hooks). Dense models only.
 
+### Routed-expert metadata (issue #22, PR #24)
+
+```toml
+[model]
+vllm_return_routed_experts = true  # default
+```
+
+When on (default), abliterix's MoE safety-expert profiler reads per-token
+routing IDs directly from `RequestOutput.outputs[0].routed_experts`
+(numpy ndarray of shape `(prompt_tokens, n_layers, top_k)`). This
+replaces the previous `collective_rpc` + forward-hook probe pipeline
+(~150 LoC of worker plumbing, deleted in PR #24).
+
+GPU-verified parity on DeepSeek-V2-Lite-Chat (issue #22 Phase B):
+top-1 expert match 22/26 layers (84.6%), top-3 set match 23/26 (88.5%).
+Divergent layers all share top-1; differences appear only in near-tie
+positions of the top-3 set, consistent with the new path reading
+post-tie-break selections vs the old hook reading raw router logits.
+
+Memory cost: `tokens × n_layers × top_k × 4` bytes per request. For a
+60-layer top-6 MoE generating 100 tokens that is ~140 KB per request —
+trivial against the model footprint, but exposed as a config knob so
+users with throughput-critical sweeps can disable it. Set to `false` to
+fall back to the legacy hook-based probe (kept around but not exercised
+in CI; will be deleted on the next major if no users depend on it).
+
+This removed one of the two reasons abliterix needed
+`VLLM_ALLOW_INSECURE_SERIALIZATION=1` — the other reason
+(`VLLMMoEEditor.apply()` per-trial suppression) still requires it, so
+the env var auto-set logic in `vllm_compat.ensure_vllm_env(needs_collective_rpc=True)`
+is unchanged.
+
 ### LoRA pool / target modules
 
 ```toml

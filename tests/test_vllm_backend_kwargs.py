@@ -218,6 +218,32 @@ def test_build_llm_kwargs_default_recipe():
     # PR #21 review item 2: enforce_eager kwarg must NOT be passed —
     # compilation_config encodes the same intent and we don't want both.
     assert "enforce_eager" not in kwargs
+    # Issue #22: routed_experts replaces collective_rpc probe by default.
+    assert kwargs["enable_return_routed_experts"] is True
+
+
+def test_build_llm_kwargs_routed_experts_can_be_disabled():
+    """Issue #22: users can opt out of the routed_experts metadata cost
+    by setting ``vllm_return_routed_experts = false``. The kwarg still
+    appears (vLLM accepts both True and False), so the legacy
+    collective_rpc probe path can be re-enabled at config time."""
+    cfg = _make_config(vllm_return_routed_experts=False)
+    with patch("abliterix.core.vllm_backend.torch.cuda.device_count", return_value=1):
+        with patch(
+            "abliterix.core.vllm_backend.torch.cuda.is_available", return_value=True
+        ):
+            with patch(
+                "abliterix.core.vllm_backend.torch.cuda.get_device_capability",
+                return_value=(9, 0),
+            ):
+                kwargs = _build_llm_kwargs(
+                    cfg,
+                    model_arch="LlamaForCausalLM",
+                    is_fp8=False,
+                    kv_cache_dtype=None,
+                    lora_max_rank=16,
+                )
+    assert kwargs["enable_return_routed_experts"] is False
 
 
 def test_build_llm_kwargs_mla_model_gets_flash_attn_mla():

@@ -317,103 +317,25 @@ def _worker_get_router_weights(worker: Any) -> dict[int, Any]:
 
 
 # ---------------------------------------------------------------------------
-# Safety-expert profiling via router forward hooks (vLLM equivalent of HF's
-# SteeringEngine.identify_safety_experts).  Used when the vLLM-native fast
-# extraction path skips HF loading entirely — we still need per-layer
-# expert-risk rankings to drive router suppression per trial.
-# ---------------------------------------------------------------------------
-
-
-def _worker_install_router_hooks(worker: Any, top_k: int) -> int:
-    """Install a forward hook on every layer's router that accumulates
-    expert-selection counts into ``worker._router_{phase}_counts``.
-
-    The hook topk's the router LOGITS itself (router output is raw gate
-    logits for gpt-oss; downstream MoE forward otherwise does the topk).
-    Phase ("benign" | "target") is set externally via
-    :func:`_worker_set_router_phase` so a single hook registration covers
-    both runs.
-    """
-    import torch
-
-    decoder = _worker_resolve_model(worker)
-    layers = decoder.layers
-
-    worker._router_phase = "benign"
-    worker._router_benign_counts = {}
-    worker._router_target_counts = {}
-    worker._router_benign_tokens = {}
-    worker._router_target_tokens = {}
-    worker._router_hook_handles = []
-
-    def _make_hook(layer_idx: int):
-        def hook(module, inp, out):
-            with torch.no_grad():
-                # Router output can be a Tensor (gpt-oss ReplicatedLinear)
-                # or a tuple (logits, aux); take the first element if tuple.
-                logits = out[0] if isinstance(out, tuple) else out
-                if not isinstance(logits, torch.Tensor) or logits.dim() < 2:
-                    return
-                k = min(top_k, logits.shape[-1])
-                _, selected = logits.topk(k, dim=-1)
-                flat = selected.reshape(-1)
-                n_tok = flat.numel() // k
-
-                phase = worker._router_phase
-                counts = getattr(worker, f"_router_{phase}_counts")
-                tokens = getattr(worker, f"_router_{phase}_tokens")
-                if layer_idx not in counts:
-                    counts[layer_idx] = {}
-                tokens[layer_idx] = tokens.get(layer_idx, 0) + n_tok
-                per_layer = counts[layer_idx]
-                unique, cs = flat.unique(return_counts=True)
-                for eid, c in zip(unique.tolist(), cs.tolist()):
-                    per_layer[eid] = per_layer.get(eid, 0) + int(c)
-
-        return hook
-
-    for idx, layer in enumerate(layers):
-        router, _ = _worker_locate_router(layer)
-        if router is None:
-            continue
-        h = router.register_forward_hook(_make_hook(idx))
-        worker._router_hook_handles.append(h)
-    return len(worker._router_hook_handles)
-
-
-def _worker_set_router_phase(worker: Any, phase: str) -> bool:
-    """Switch accumulation target between 'benign' and 'target'.  Resets
-    counts for the selected phase so re-entry is safe."""
-    assert phase in ("benign", "target")
-    worker._router_phase = phase
-    setattr(worker, f"_router_{phase}_counts", {})
-    setattr(worker, f"_router_{phase}_tokens", {})
-    return True
-
-
-def _worker_get_router_counts(worker: Any) -> dict[str, Any]:
-    """Return accumulated counts (serialisable dict of primitives)."""
-    return {
-        "benign_counts": getattr(worker, "_router_benign_counts", {}),
-        "benign_tokens": getattr(worker, "_router_benign_tokens", {}),
-        "target_counts": getattr(worker, "_router_target_counts", {}),
-        "target_tokens": getattr(worker, "_router_target_tokens", {}),
-    }
-
-
-def _worker_remove_router_hooks(worker: Any) -> int:
-    """Remove all installed router hooks and zero the bookkeeping state."""
-    handles = getattr(worker, "_router_hook_handles", [])
-    for h in handles:
-        h.remove()
-    worker._router_hook_handles = []
-    # Keep the counts dicts around in case the driver wants to re-fetch,
-    # but mark hooks-gone so a subsequent install doesn't double-register.
-    return len(handles)
-
-
-# ---------------------------------------------------------------------------
-# Driver-side orchestration.
+# Safety-expert profiling via vLLM's enable_return_routed_experts
+# (vLLM equivalent of HF's SteeringEngine.identify_safety_experts).
+# Used when the vLLM-native fast extraction path skips HF loading entirely
+# — we still need per-layer expert-risk rankings to drive router
+# suppression per trial.
+#
+# Issue #22 / PR #24: this used to be ~150 LoC of collective_rpc + worker
+# forward hooks (``_worker_install_router_hooks`` and friends, deleted).
+# vLLM 0.20.x's ``RequestOutput.outputs[0].routed_experts`` exposes the
+# same per-token routing IDs as a numpy array of shape
+# ``(prompt_tokens, n_layers, top_k)`` — no rpc needed, no hooks needed,
+# no insecure serialization needed.
+#
+# Verified on DeepSeek-V2-Lite (issue #22 GPU smoke B7): with
+# ``enable_return_routed_experts=True`` and ``max_tokens=1``, the array
+# covers all prompt tokens (vllm/v1/core/sched/scheduler.py:1612 sets
+# ``num_tokens = request.num_tokens - 1``). Dense layers carry an
+# all-zero placeholder slice; MoE layers carry expert ids in
+# ``[0, num_experts)``.
 # ---------------------------------------------------------------------------
 
 
@@ -422,34 +344,36 @@ def profile_safety_experts_vllm(
     benign_msgs: list,
     target_msgs: list,
     tokenizer,
-    top_k: int = 4,
+    top_k: int = 4,  # noqa: ARG001 — kept for API stability; top_k is now baked in by vLLM
 ) -> dict[int, list[tuple[int, float]]]:
-    """Compute per-layer expert risk scores using the *already-loaded* vLLM
-    instance — no HF model required.
+    """Compute per-layer expert risk scores by reading vLLM's per-token
+    routed-expert IDs directly off the ``RequestOutput``.
 
-    Attaches forward hooks to every layer's router via ``collective_rpc``,
-    runs the benign and target prompt sets through ``llm.generate`` with
-    ``max_tokens=1`` (prefill-only, covers all prompt-token routing), then
-    reads counts back from worker rank 0 (router is ``ReplicatedLinear`` so
-    every worker saw identical logits).
+    Requires the LLM to have been constructed with
+    ``enable_return_routed_experts=True`` (abliterix's
+    ``[model].vllm_return_routed_experts`` defaults to True; flip it off
+    to skip this path). The function runs ``llm.generate`` once over the
+    benign prompt set and once over the target prompt set with
+    ``max_tokens=1`` (prefill-only, gives full prompt-token routing),
+    aggregates per-(layer, expert) counts driver-side, and computes risk
+    as ``P(expert | target) - P(expert | benign)``.
 
-    Returns ``{layer_idx: [(expert_id, risk_score), ...]}`` sorted by risk
-    descending, where ``risk = P(expert | target) - P(expert | benign)``.
-    This matches the output format of
-    :meth:`SteeringEngine.identify_safety_experts` so callers can treat
-    both paths interchangeably.
+    Returns ``{layer_idx: [(expert_id, risk_score), ...]}`` sorted by
+    risk descending. Layer indices are skipped when both benign and
+    target slices are all-zero placeholders (dense layers in DeepSeek-V2
+    style architectures emit zero rows in the routed_experts array).
 
     Parameters
     ----------
     top_k : int
-        Top-k to apply to raw router logits.  For gpt-oss, this is the
-        model's ``num_experts_per_tok`` (default 4).  Matches the actual
-        routing the MoE forward path does downstream.
+        Kept for API compatibility with the legacy hook-based profiler
+        but unused: vLLM's routed_experts array is already top-k'd at
+        the model's native ``num_experts_per_tok``. Logged when supplied
+        but not asserted.
     """
-    from vllm import SamplingParams
+    import numpy as np
 
-    engine = llm.llm_engine
-    engine.collective_rpc(_worker_install_router_hooks, args=(top_k,))
+    from vllm import SamplingParams
 
     # Chat-template formatting — mirror VLLMGenerator._format_prompt so the
     # profiling prompts match what trial generation will see.
@@ -481,30 +405,58 @@ def profile_safety_experts_vllm(
 
     params = SamplingParams(temperature=0.0, max_tokens=1)
 
-    print("  Profiling benign prompts via vLLM...")
-    engine.collective_rpc(_worker_set_router_phase, args=("benign",))
-    llm.generate(_fmt(benign_msgs), params, use_tqdm=False)
+    def _accumulate(
+        prompts: list[str],
+    ) -> tuple[dict[int, dict[int, int]], dict[int, int]]:
+        """Return (per_layer_expert_counts, per_layer_token_counts).
 
-    print("  Profiling target prompts via vLLM...")
-    engine.collective_rpc(_worker_set_router_phase, args=("target",))
-    llm.generate(_fmt(target_msgs), params, use_tqdm=False)
+        Aggregates the routed_experts arrays for ``llm.generate(prompts)``.
+        Skips layers whose slice is all zeros across every token of every
+        prompt (those are the dense placeholders).
+        """
+        counts: dict[int, dict[int, int]] = {}
+        tokens: dict[int, int] = {}
+        outs = llm.generate(prompts, params, use_tqdm=False)
+        for out in outs:
+            arr = getattr(out.outputs[0], "routed_experts", None)
+            if arr is None or not isinstance(arr, np.ndarray):
+                # enable_return_routed_experts is off, or the model has no
+                # MoE layers, or vLLM dropped the field on this output.
+                continue
+            if arr.ndim != 3:
+                # Defensive: shape unexpectedly different.
+                continue
+            n_tokens, n_layers, _k = arr.shape
+            for layer in range(n_layers):
+                slab = arr[:, layer, :]
+                # Dense placeholder detection: every entry is zero AND
+                # at least one MoE layer in this same array has a
+                # non-zero entry. We treat it as "skip" via the
+                # all-zero check; the caller's safety dict will not
+                # contain dense-only layers.
+                if int(slab.max()) == 0 and int(slab.min()) == 0:
+                    continue
+                tokens[layer] = tokens.get(layer, 0) + n_tokens
+                # Histogram in pure numpy then merge into the running dict.
+                vals, vc = np.unique(slab, return_counts=True)
+                bucket = counts.setdefault(layer, {})
+                for v, c in zip(vals.tolist(), vc.tolist()):
+                    bucket[int(v)] = bucket.get(int(v), 0) + int(c)
+        return counts, tokens
 
-    # Harvest counts from any rank (router is replicated ⇒ all ranks equal).
-    results = engine.collective_rpc(_worker_get_router_counts)
-    engine.collective_rpc(_worker_remove_router_hooks)
+    print("  Profiling benign prompts via vLLM routed_experts...")
+    benign_counts, benign_tokens = _accumulate(_fmt(benign_msgs))
 
-    if not results:
+    print("  Profiling target prompts via vLLM routed_experts...")
+    target_counts, target_tokens = _accumulate(_fmt(target_msgs))
+
+    if not benign_counts and not target_counts:
         print(
-            "  [yellow]profile_safety_experts_vllm: workers returned "
-            "no results — router probably never fired[/]"
+            "  [yellow]profile_safety_experts_vllm: routed_experts was empty "
+            "for every output. Confirm vllm_return_routed_experts=true in "
+            "the [model] config and the model is actually MoE.[/]"
         )
         return {}
-
-    r = results[0]
-    benign_counts = r["benign_counts"]
-    target_counts = r["target_counts"]
-    benign_tokens = r["benign_tokens"]
-    target_tokens = r["target_tokens"]
 
     safety: dict[int, list[tuple[int, float]]] = {}
     all_layers = sorted(set(benign_counts) | set(target_counts))
@@ -525,7 +477,7 @@ def profile_safety_experts_vllm(
         top_scores = [safety[i][0][1] for i in sorted(safety) if safety[i]]
         avg = sum(top_scores) / len(top_scores) if top_scores else 0.0
         print(
-            f"  Profiled {len(safety)} MoE layers via vLLM, "
+            f"  Profiled {len(safety)} MoE layers via vLLM routed_experts, "
             f"avg top risk diff: {avg:.4f}"
         )
     return safety

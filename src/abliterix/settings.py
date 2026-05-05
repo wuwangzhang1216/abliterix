@@ -381,6 +381,23 @@ class ModelConfig(BaseModel):
         ),
     )
 
+    vllm_return_routed_experts: bool = Field(
+        default=True,
+        description=(
+            "Pass-through for vLLM's ``enable_return_routed_experts`` (vLLM "
+            "0.20.x+). When True (default), abliterix's MoE safety-expert "
+            "profiler reads per-token routing IDs directly from "
+            "``RequestOutput.outputs[0].routed_experts`` instead of "
+            "installing forward hooks via ``collective_rpc``. This removes "
+            "the entire probe rpc surface and ~150 LoC of worker plumbing "
+            "(see issue #22 / PR #24). Memory cost is "
+            "``tokens * layers * top_k * 4`` bytes per request — "
+            "~140 KB for a 100-token MoE-60-top6 generation. Set False to "
+            "fall back to the legacy collective_rpc + hook path (kept for "
+            "vLLM <0.20 compatibility; not exercised in CI)."
+        ),
+    )
+
     vllm_compile_mode: CompileMode = Field(
         default="eager",
         description=(
