@@ -6,9 +6,9 @@
 
 import os
 import sys
-from typing import Any, Dict
+from typing import Any, Dict, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 from pydantic_settings import (
     BaseSettings,
     CliSettingsSource,
@@ -17,7 +17,29 @@ from pydantic_settings import (
     TomlConfigSettingsSource,
 )
 
-from .types import (
+# vLLM 0.20.x's MoEBackend literal — mirrored here so abliterix can reject
+# typos at config-load time without importing vLLM. Update alongside vLLM
+# upgrades. Canonical source: vllm/config/kernel.py:MoEBackend.
+MoEBackend = Literal[
+    "auto",
+    "triton",
+    "deep_gemm",
+    "deep_gemm_mega_moe",
+    "cutlass",
+    "flashinfer_trtllm",
+    "flashinfer_cutlass",
+    "flashinfer_cutedsl",
+    "marlin",
+    "aiter",
+    "emulation",
+]
+
+# CompileMode is owned by vllm_compilation_config; settings re-uses the
+# same Literal so a typo (e.g. "eagar") is caught at config-load instead
+# of inside vllm_compilation_config.build().
+from .core.vllm_compilation_config import CompileMode  # noqa: E402
+
+from .types import (  # noqa: E402
     DecayKernel,
     PromptSource,
     QuantMode,
@@ -287,7 +309,7 @@ class ModelConfig(BaseModel):
         ),
     )
 
-    moe_backend: str = Field(
+    moe_backend: MoEBackend = Field(
         default="triton",
         description=(
             "vLLM MoE compute backend (``KernelConfig.moe_backend``).  "
@@ -359,21 +381,46 @@ class ModelConfig(BaseModel):
         ),
     )
 
-    vllm_compile_mode: str = Field(
+    vllm_compile_mode: CompileMode = Field(
         default="eager",
         description=(
             "abliterix-side selector for vLLM's ``compilation_config``.\n"
             "  'eager'                 — equivalent to ``enforce_eager=True``; "
             "all CUDA graphs off (current behaviour, safest for MoE editor "
             "forward hooks).\n"
-            "  'moe_eager_rest_compile' — keep MoE layers eager so router "
-            "suppression hooks fire, but capture CUDA graphs for non-MoE "
-            "layers (recovers most throughput; needs GPU smoke per "
-            "PRD #20 Out of Scope).\n"
+            "  'moe_eager_rest_compile' — REJECTED until GPU smoke lands "
+            "(PRD #20 Out of Scope). Use 'eager' for now; this mode raises "
+            "at config load to avoid silent fallback noise on every engine "
+            "init.\n"
             "  'full_compile'          — full vLLM compile + CUDA graphs "
             "everywhere (no MoE editing supported; dense models only)."
         ),
     )
+
+    @model_validator(mode="after")
+    def _validate_vllm_combos(self) -> "ModelConfig":
+        """Reject vLLM config combinations that would either silently
+        no-op or contradict each other."""
+        # Item 4 from PR review: until the post-load attach lands, fail
+        # loudly on the unimplemented compile mode rather than warn-and-
+        # fallback every engine init (which spams logs across sweeps).
+        if self.vllm_compile_mode == "moe_eager_rest_compile":
+            raise ValueError(
+                "vllm_compile_mode='moe_eager_rest_compile' is not yet "
+                "implemented — the post-load layer-index discovery is "
+                "deferred per PRD #20 Out of Scope. Use 'eager' until the "
+                "GPU smoke for static_all_moe_layers ships."
+            )
+        # Item 8: lora_target_modules without enable_lora is silently dropped
+        # by the if-not-disabled guard in vllm_backend. Reject explicitly so
+        # users see the misconfiguration at config load.
+        if self.disable_lora and self.lora_target_modules:
+            raise ValueError(
+                "lora_target_modules is set but disable_lora=True — the "
+                "target list would be silently dropped because LoRA is off. "
+                "Either unset lora_target_modules or set disable_lora=false."
+            )
+        return self
 
 
 class InferenceConfig(BaseModel):

@@ -4,6 +4,8 @@ These cover the de-hardcoded paths added by PRD #20:
 
 - ``_resolve_attention_backend`` — MLA-aware attention backend selection.
 - ``_should_disable_custom_all_reduce`` — Blackwell PCIe sm_120 detection.
+- ``_resolve_compile_mode`` — legacy ``enforce_eager`` reconciliation.
+- ``_build_llm_kwargs`` — pure kwargs assembly (PR #21 review item 7).
 
 We avoid touching ``VLLMGenerator.__init__`` directly because it imports
 vLLM, which CI does not have.
@@ -13,11 +15,16 @@ from __future__ import annotations
 
 from unittest.mock import patch
 
+import pytest
+
 from abliterix.core.vllm_backend import (
     _MLA_ARCH_FRAGMENTS,
+    _build_llm_kwargs,
     _resolve_attention_backend,
+    _resolve_compile_mode,
     _should_disable_custom_all_reduce,
 )
+from abliterix.settings import AbliterixConfig, ModelConfig
 
 
 # ---------------------------------------------------------------------------
@@ -142,3 +149,243 @@ def test_auto_detect_no_cuda_returns_false():
         "abliterix.core.vllm_backend.torch.cuda.is_available", return_value=False
     ):
         assert _should_disable_custom_all_reduce(None) is False
+
+
+# ---------------------------------------------------------------------------
+# _resolve_compile_mode (PR #21 review item 2)
+# ---------------------------------------------------------------------------
+
+
+def test_resolve_compile_mode_legacy_enforce_eager_wins():
+    """If a recipe still sets ``enforce_eager=True`` (pre-PRD #20), the
+    resolved mode must be 'eager' — that's the only way the two fields
+    cannot disagree at vLLM construction time."""
+    assert _resolve_compile_mode(True, "eager") == "eager"
+    assert _resolve_compile_mode(True, "full_compile") == "eager"
+
+
+def test_resolve_compile_mode_default_path():
+    """Default recipe (enforce_eager=False, vllm_compile_mode='eager')
+    keeps the historical eager behaviour."""
+    assert _resolve_compile_mode(False, "eager") == "eager"
+
+
+def test_resolve_compile_mode_full_compile():
+    assert _resolve_compile_mode(False, "full_compile") == "full_compile"
+
+
+# ---------------------------------------------------------------------------
+# _build_llm_kwargs — integration test (PR #21 review item 7)
+# ---------------------------------------------------------------------------
+
+
+def _make_config(**model_overrides):
+    """Build an AbliterixConfig with the model fields under test, defaulting
+    everything else. Avoids loading a real TOML file from disk."""
+    return AbliterixConfig.model_construct(
+        model=ModelConfig(model_id="dummy/model", **model_overrides)
+    )
+
+
+def test_build_llm_kwargs_default_recipe():
+    """Default recipe on an unknown architecture: triton MoE backend,
+    no attention_config (vLLM picks), eager compile, LoRA enabled."""
+    cfg = _make_config()
+    with patch("abliterix.core.vllm_backend.torch.cuda.device_count", return_value=1):
+        with patch(
+            "abliterix.core.vllm_backend.torch.cuda.is_available", return_value=True
+        ):
+            with patch(
+                "abliterix.core.vllm_backend.torch.cuda.get_device_capability",
+                return_value=(9, 0),
+            ):
+                kwargs = _build_llm_kwargs(
+                    cfg,
+                    model_arch="LlamaForCausalLM",
+                    is_fp8=False,
+                    kv_cache_dtype=None,
+                    lora_max_rank=16,
+                )
+    assert kwargs["model"] == "dummy/model"
+    assert kwargs["moe_backend"] == "triton"
+    assert kwargs["compilation_config"] == {"mode": 0, "cudagraph_mode": 0}
+    assert "attention_config" not in kwargs  # arch is non-MLA, non-sink
+    assert kwargs["limit_mm_per_prompt"] == {"image": 0, "video": 0, "audio": 0}
+    assert kwargs["enable_lora"] is True
+    assert kwargs["max_lora_rank"] == 16
+    assert "kv_cache_dtype" not in kwargs
+    assert "quantization" not in kwargs
+    # PR #21 review item 2: enforce_eager kwarg must NOT be passed —
+    # compilation_config encodes the same intent and we don't want both.
+    assert "enforce_eager" not in kwargs
+
+
+def test_build_llm_kwargs_mla_model_gets_flash_attn_mla():
+    """Regression: DeepSeek-V2/V3 / MiniMax-M2.x must trigger MLA backend."""
+    cfg = _make_config()
+    with patch("abliterix.core.vllm_backend.torch.cuda.device_count", return_value=1):
+        with patch(
+            "abliterix.core.vllm_backend.torch.cuda.is_available", return_value=True
+        ):
+            with patch(
+                "abliterix.core.vllm_backend.torch.cuda.get_device_capability",
+                return_value=(9, 0),
+            ):
+                kwargs = _build_llm_kwargs(
+                    cfg,
+                    model_arch="DeepseekV3ForCausalLM",
+                    is_fp8=False,
+                    kv_cache_dtype=None,
+                    lora_max_rank=16,
+                )
+    assert kwargs["attention_config"] == {"backend": "FLASH_ATTN_MLA"}
+
+
+def test_build_llm_kwargs_legacy_enforce_eager_routes_through_compile_mode():
+    """PR #21 review item 2: a recipe with ``enforce_eager=true`` and
+    ``vllm_compile_mode='full_compile'`` must NOT pass an inconsistent
+    pair to vLLM. The legacy field collapses to compile_mode='eager'."""
+    cfg = _make_config(enforce_eager=True, vllm_compile_mode="full_compile")
+    with patch("abliterix.core.vllm_backend.torch.cuda.device_count", return_value=1):
+        with patch(
+            "abliterix.core.vllm_backend.torch.cuda.is_available", return_value=True
+        ):
+            with patch(
+                "abliterix.core.vllm_backend.torch.cuda.get_device_capability",
+                return_value=(9, 0),
+            ):
+                kwargs = _build_llm_kwargs(
+                    cfg,
+                    model_arch="LlamaForCausalLM",
+                    is_fp8=False,
+                    kv_cache_dtype=None,
+                    lora_max_rank=16,
+                )
+    assert kwargs["compilation_config"] == {"mode": 0, "cudagraph_mode": 0}
+    assert "enforce_eager" not in kwargs
+
+
+def test_build_llm_kwargs_user_attention_override_wins():
+    """An explicit attention_backend in the recipe always beats arch detection."""
+    cfg = _make_config(attention_backend="FLASHMLA")
+    with patch("abliterix.core.vllm_backend.torch.cuda.device_count", return_value=1):
+        with patch(
+            "abliterix.core.vllm_backend.torch.cuda.is_available", return_value=True
+        ):
+            with patch(
+                "abliterix.core.vllm_backend.torch.cuda.get_device_capability",
+                return_value=(9, 0),
+            ):
+                kwargs = _build_llm_kwargs(
+                    cfg,
+                    model_arch="DeepseekV3ForCausalLM",  # would auto-route
+                    is_fp8=False,
+                    kv_cache_dtype=None,
+                    lora_max_rank=16,
+                )
+    assert kwargs["attention_config"] == {"backend": "FLASHMLA"}
+
+
+def test_build_llm_kwargs_lora_pool_propagates():
+    """vllm_max_loras > 1 should set both max_loras and max_cpu_loras."""
+    cfg = _make_config(vllm_max_loras=8)
+    with patch("abliterix.core.vllm_backend.torch.cuda.device_count", return_value=1):
+        with patch(
+            "abliterix.core.vllm_backend.torch.cuda.is_available", return_value=True
+        ):
+            with patch(
+                "abliterix.core.vllm_backend.torch.cuda.get_device_capability",
+                return_value=(9, 0),
+            ):
+                kwargs = _build_llm_kwargs(
+                    cfg,
+                    model_arch="LlamaForCausalLM",
+                    is_fp8=False,
+                    kv_cache_dtype=None,
+                    lora_max_rank=16,
+                )
+    assert kwargs["max_loras"] == 8
+    assert kwargs["max_cpu_loras"] >= 8
+
+
+def test_build_llm_kwargs_disable_lora_drops_lora_kwargs():
+    """When LoRA is disabled, the LoRA group of kwargs must not appear at all."""
+    cfg = _make_config(disable_lora=True)
+    with patch("abliterix.core.vllm_backend.torch.cuda.device_count", return_value=1):
+        with patch(
+            "abliterix.core.vllm_backend.torch.cuda.is_available", return_value=True
+        ):
+            with patch(
+                "abliterix.core.vllm_backend.torch.cuda.get_device_capability",
+                return_value=(9, 0),
+            ):
+                kwargs = _build_llm_kwargs(
+                    cfg,
+                    model_arch="GptOssForCausalLM",
+                    is_fp8=False,
+                    kv_cache_dtype=None,
+                    lora_max_rank=16,
+                )
+    assert "enable_lora" not in kwargs
+    assert "max_lora_rank" not in kwargs
+    assert "max_loras" not in kwargs
+    assert "lora_target_modules" not in kwargs
+
+
+def test_build_llm_kwargs_fp8_propagates():
+    """is_fp8=True should set quantization='fp8' and kv_cache_dtype if given."""
+    cfg = _make_config()
+    with patch("abliterix.core.vllm_backend.torch.cuda.device_count", return_value=1):
+        with patch(
+            "abliterix.core.vllm_backend.torch.cuda.is_available", return_value=True
+        ):
+            with patch(
+                "abliterix.core.vllm_backend.torch.cuda.get_device_capability",
+                return_value=(9, 0),
+            ):
+                kwargs = _build_llm_kwargs(
+                    cfg,
+                    model_arch="LlamaForCausalLM",
+                    is_fp8=True,
+                    kv_cache_dtype="fp8_e4m3",
+                    lora_max_rank=16,
+                )
+    assert kwargs["quantization"] == "fp8"
+    assert kwargs["kv_cache_dtype"] == "fp8_e4m3"
+
+
+# ---------------------------------------------------------------------------
+# ModelConfig validators (PR #21 review items 4 + 8)
+# ---------------------------------------------------------------------------
+
+
+def test_model_config_rejects_unimplemented_compile_mode():
+    """PR #21 review item 4: 'moe_eager_rest_compile' must raise at config
+    load until the post-load static_all_moe_layers attach lands."""
+    with pytest.raises(ValueError, match="not yet implemented"):
+        ModelConfig(model_id="x", vllm_compile_mode="moe_eager_rest_compile")
+
+
+def test_model_config_rejects_lora_target_modules_with_disable_lora():
+    """PR #21 review item 8: lora_target_modules without enable_lora is
+    silently dropped today; reject explicitly so users see the
+    misconfiguration at config load."""
+    with pytest.raises(ValueError, match="lora_target_modules is set but"):
+        ModelConfig(
+            model_id="x",
+            disable_lora=True,
+            lora_target_modules=["o_proj"],
+        )
+
+
+def test_model_config_rejects_invalid_moe_backend():
+    """PR #21 review item 1: moe_backend is now a Literal — typos must
+    fail at config load, not deep inside vllm.LLM()."""
+    with pytest.raises(ValueError):
+        ModelConfig(model_id="x", moe_backend="tritan")  # typo
+
+
+def test_model_config_rejects_invalid_compile_mode():
+    """PR #21 review item 1: vllm_compile_mode is a Literal."""
+    with pytest.raises(ValueError):
+        ModelConfig(model_id="x", vllm_compile_mode="eagar")  # typo

@@ -77,15 +77,188 @@ _SINK_ATTENTION_ARCH_FRAGMENTS: tuple[str, ...] = (
 
 def _detect_arch_family(model_id: str, trust_remote_code: bool) -> str:
     """Return the first architecture name from the model's HF config, or
-    an empty string if the config can't be loaded."""
+    an empty string if the config can't be loaded.
+
+    A failure here means MLA-aware backend selection silently degrades to
+    "let vLLM pick", which on an MLA model can crash the engine init the
+    PRD #20 dispatcher was meant to prevent. Logged at WARNING so it's
+    visible in deploy logs without being an exception.
+    """
     try:
         from transformers import AutoConfig
 
         cfg = AutoConfig.from_pretrained(model_id, trust_remote_code=trust_remote_code)
-    except Exception:
+    except Exception as exc:
+        print(
+            "  [yellow]Warning: could not load HF config for arch detection "
+            f"({type(exc).__name__}: {exc}); vLLM will pick attention "
+            "backend on its own. If this model is MLA (DeepSeek-V2/V3, "
+            "MiniMax-M2.x), set ``attention_backend`` explicitly in the "
+            "[model] config to avoid an engine-init crash.[/]"
+        )
         return ""
     archs = getattr(cfg, "architectures", None) or []
     return archs[0] if archs else ""
+
+
+def _resolve_compile_mode(enforce_eager_legacy: bool, vllm_compile_mode: str) -> str:
+    """Reconcile the legacy ``enforce_eager`` field with the new
+    ``vllm_compile_mode`` field.
+
+    The legacy field still exists for recipes that pre-date PRD #20.
+    When ``enforce_eager=True`` is set, we honour it by forcing the
+    "eager" mode regardless of ``vllm_compile_mode`` — that's the only
+    way the two fields can stay consistent without rejecting
+    historical recipes at config load.
+    """
+    if enforce_eager_legacy:
+        return "eager"
+    return vllm_compile_mode
+
+
+def _detect_fp8_and_kv_dtype(
+    config: AbliterixConfig, *, model_id: str, trust_remote_code: bool
+) -> tuple[bool, str | None]:
+    """Decide whether vLLM should treat this model as FP8 and which KV
+    cache dtype to use.
+
+    Two passes:
+
+    1. Recipe wins: ``quant_method = "fp8"`` always sets ``is_fp8=True``.
+    2. HF config sniff: native FP8 models (MiniMax-M2.5, Qwen3.5-*-FP8)
+       ship ``quantization_config.quant_method = "fp8"`` in their
+       config.json. vLLM auto-detects; we still need the bool to seed
+       the KV-cache-dtype default below.
+
+    Then ``kv_cache_dtype``:
+
+    - Recipe override wins.
+    - On FP8 + H100+ (sm_90+) auto-default to ``fp8_e4m3`` for 2x KV
+      capacity. Older cards have no FP8 KV path.
+    """
+    is_fp8 = bool(
+        config.model.quant_method and config.model.quant_method.value == "fp8"
+    )
+    if not is_fp8:
+        try:
+            from transformers import AutoConfig
+
+            _auto_cfg = AutoConfig.from_pretrained(
+                model_id, trust_remote_code=trust_remote_code
+            )
+            _qcfg = getattr(_auto_cfg, "quantization_config", None)
+            if _qcfg is None:
+                _text_cfg = getattr(_auto_cfg, "text_config", None)
+                if _text_cfg is not None:
+                    _qcfg = getattr(_text_cfg, "quantization_config", None)
+            if _qcfg is not None:
+                _qm = (
+                    _qcfg if isinstance(_qcfg, dict) else getattr(_qcfg, "__dict__", {})
+                )
+                if _qm.get("quant_method") == "fp8":
+                    is_fp8 = True
+        except Exception:
+            pass
+
+    kv_dtype = config.model.kv_cache_dtype
+    if kv_dtype is None and is_fp8 and torch.cuda.is_available():
+        try:
+            cc = torch.cuda.get_device_capability(0)
+            if cc[0] >= 9:
+                kv_dtype = "fp8_e4m3"
+        except Exception:
+            pass
+    return is_fp8, kv_dtype
+
+
+def _build_llm_kwargs(
+    config: AbliterixConfig,
+    *,
+    model_arch: str,
+    is_fp8: bool,
+    kv_cache_dtype: str | None,
+    lora_max_rank: int,
+) -> dict[str, Any]:
+    """Pure function that assembles the dict passed to ``vllm.LLM(...)``.
+
+    Lifted out of ``VLLMGenerator.__init__`` so the kwargs assembly is
+    unit-testable without importing vLLM (PR #21 review item 7). Keep
+    every conditional kwarg branch in this function so tests can lock
+    them.
+    """
+    from . import vllm_compilation_config
+
+    tp = config.model.tensor_parallel_size
+    if tp is None:
+        tp = torch.cuda.device_count()
+
+    compile_mode = _resolve_compile_mode(
+        config.model.enforce_eager, config.model.vllm_compile_mode
+    )
+    compilation_config = vllm_compilation_config.build(compile_mode)
+
+    kwargs: dict[str, Any] = dict(
+        model=config.model.model_id,
+        tensor_parallel_size=tp,
+        gpu_memory_utilization=config.model.gpu_memory_utilization,
+        trust_remote_code=config.model.trust_remote_code or False,
+        enable_expert_parallel=config.model.enable_expert_parallel,
+        # MoE compute backend. Default 'triton' avoids the FlashInfer
+        # cutlass per-expert-group JIT compile that costs ~30 minutes
+        # on first sm_90 cold start.
+        moe_backend=config.model.moe_backend,
+        # generate_and_score requests logprobs=100 to build a sparse KL
+        # distribution that covers >99.9% of the probability mass.  vLLM
+        # V1 caps sampler logprobs at 20 by default; lift it explicitly
+        # so the KL computation keeps its top-100 tail.
+        max_logprobs=100,
+        # vLLM 0.20.x compilation_config encodes the eager/non-eager
+        # intent. ``enforce_eager`` is intentionally NOT passed here —
+        # _resolve_compile_mode folds it into ``compile_mode`` above so
+        # the two fields cannot disagree.
+        compilation_config=compilation_config,
+        # Disable vLLM custom all-reduce only on Blackwell PCIe sm_120
+        # (deadlock); NVLink Hopper / SXM Blackwell keep the perf win.
+        disable_custom_all_reduce=_should_disable_custom_all_reduce(
+            config.model.disable_custom_all_reduce
+        ),
+        enable_prefix_caching=not bool(config.model.use_in_place_editing),
+    )
+
+    attention_backend = _resolve_attention_backend(
+        config.model.attention_backend, model_arch
+    )
+    if attention_backend is not None:
+        kwargs["attention_config"] = {"backend": attention_backend}
+
+    kwargs["limit_mm_per_prompt"] = config.model.limit_mm_per_prompt or {
+        "image": 0,
+        "video": 0,
+        "audio": 0,
+    }
+
+    if not config.model.disable_lora:
+        kwargs.update(
+            enable_lora=True,
+            max_lora_rank=lora_max_rank,
+            max_loras=config.model.vllm_max_loras,
+            max_cpu_loras=max(config.model.vllm_max_loras + 1, 2),
+        )
+        if config.model.lora_target_modules:
+            kwargs["lora_target_modules"] = list(config.model.lora_target_modules)
+
+    if config.model.max_model_len is not None:
+        kwargs["max_model_len"] = config.model.max_model_len
+    if config.model.max_num_seqs is not None:
+        kwargs["max_num_seqs"] = config.model.max_num_seqs
+    if config.model.hf_overrides:
+        kwargs["hf_overrides"] = config.model.hf_overrides
+    if is_fp8:
+        kwargs["quantization"] = "fp8"
+    if kv_cache_dtype is not None:
+        kwargs["kv_cache_dtype"] = kv_cache_dtype
+
+    return kwargs
 
 
 def _resolve_attention_backend(
@@ -140,7 +313,6 @@ class VLLMGenerator:
     """
 
     def __init__(self, config: AbliterixConfig):
-        from . import vllm_compilation_config
         from .vllm_compat import (
             check_vllm_version,
             ensure_vllm_env,
@@ -193,154 +365,21 @@ class VLLMGenerator:
             config.model.vllm_max_lora_rank or _DEFAULT_VLLM_MAX_LORA_RANK
         )
 
-        # Resolve the attention backend: user override → MLA-aware
-        # auto-detect → vLLM default. None means "let vLLM pick".
-        attention_backend = _resolve_attention_backend(
-            config.model.attention_backend, model_arch
+        # FP8 detection (recipe flag, then HF config sniff) + KV cache
+        # dtype auto-default. Extracted so __init__ stays readable.
+        is_fp8, kv_cache_dtype = _detect_fp8_and_kv_dtype(
+            config, model_id=model_id, trust_remote_code=trust
         )
 
-        # Build the compilation_config dict via the dedicated module so the
-        # rest of the file does not depend on vLLM 0.20.x internals.
-        # ``vllm_compile_mode`` is the abliterix-level intent; the dict
-        # shape is hidden in vllm_compilation_config.build().
-        compile_mode = config.model.vllm_compile_mode
-        # The 'eager' mode keeps backwards-compat with the old
-        # enforce_eager=True path; everything else needs MoE layer indices
-        # which we don't know until the model is loaded — for now expose
-        # eager + full_compile here and route moe_eager_rest_compile
-        # through the post-load attach (future work, tracked in PRD #20
-        # Out of Scope).
-        if compile_mode == "moe_eager_rest_compile":
-            print(
-                "  [yellow]vllm_compile_mode='moe_eager_rest_compile' is not "
-                "yet wired through pre-load — falling back to 'eager' "
-                "(see PRD #20 Out of Scope).[/]"
-            )
-            compile_mode = "eager"
-        compilation_config = vllm_compilation_config.build(compile_mode)
-
-        kwargs: dict[str, Any] = dict(
-            model=model_id,
-            tensor_parallel_size=tp,
-            gpu_memory_utilization=config.model.gpu_memory_utilization,
-            trust_remote_code=trust,
-            # enforce_eager kept for backwards-compat with recipes that set
-            # it explicitly. compilation_config above also encodes the
-            # eager/non-eager intent; vLLM honours the more restrictive of
-            # the two.
-            enforce_eager=config.model.enforce_eager,
-            enable_expert_parallel=config.model.enable_expert_parallel,
-            # MoE compute backend. Default 'triton' avoids the FlashInfer
-            # cutlass per-expert-group JIT compile that costs ~30 minutes
-            # on first sm_90 cold start. Recipes that want the cutlass
-            # perf can override via ``moe_backend = "flashinfer_cutlass"``.
-            moe_backend=config.model.moe_backend,
-            # generate_and_score requests logprobs=100 to build a sparse KL
-            # distribution that covers >99.9% of the probability mass.  vLLM
-            # V1 caps sampler logprobs at 20 by default; lift it explicitly
-            # so the KL computation keeps its top-100 tail.
-            max_logprobs=100,
-            # vLLM 0.20.x compilation_config: see vllm_compilation_config.py.
-            compilation_config=compilation_config,
-            # Disable vLLM custom all-reduce only when the GPU+topology
-            # actually needs it (Blackwell PCIe sm_120 deadlock). On
-            # NVLink Hopper/SXM Blackwell, leaving it on preserves the
-            # documented perf win.
-            disable_custom_all_reduce=_should_disable_custom_all_reduce(
-                config.model.disable_custom_all_reduce
-            ),
-            # NOTE: chunked_prefill is always ON in vLLM V1 (>= 0.8) and
-            # cannot be disabled.  We don't pass enable_chunked_prefill.
-            # Disable prefix caching when in-place editors are active.  Even
-            # though apply_*_projection() calls reset_prefix_cache(), the V1
-            # block-pool reset has been observed to leave the per-request KV
-            # logprob tensors stale → KL divergence reads exactly 0.0000
-            # across every trial despite the weights actually being modified.
-            # Disabling caching costs ~5% throughput on abliteration workloads
-            # (the 100 benign prompts share no prefix anyway).
-            enable_prefix_caching=not bool(config.model.use_in_place_editing),
+        # Hand kwargs assembly off to the pure helper so it stays
+        # unit-testable without importing vLLM (PR #21 review item 7).
+        kwargs = _build_llm_kwargs(
+            config,
+            model_arch=model_arch,
+            is_fp8=is_fp8,
+            kv_cache_dtype=kv_cache_dtype,
+            lora_max_rank=self._lora_max_rank,
         )
-
-        # attention_config only goes in when we actually want to override
-        # vLLM's per-arch default.
-        if attention_backend is not None:
-            kwargs["attention_config"] = {"backend": attention_backend}
-
-        # limit_mm_per_prompt: pass-through. Default keeps the historical
-        # "drop vision/audio towers" behaviour so Punica LoRA wrapper
-        # accepts hybrid VLM/MoE architectures; recipes that want
-        # multimodal active can set this explicitly.
-        kwargs["limit_mm_per_prompt"] = config.model.limit_mm_per_prompt or {
-            "image": 0,
-            "video": 0,
-            "audio": 0,
-        }
-
-        if not self._lora_disabled:
-            kwargs.update(
-                enable_lora=True,
-                max_lora_rank=self._lora_max_rank,
-                max_loras=config.model.vllm_max_loras,
-                # max_cpu_loras must be >= max_loras per LoRAConfig.validate.
-                max_cpu_loras=max(config.model.vllm_max_loras + 1, 2),
-            )
-            if config.model.lora_target_modules:
-                kwargs["lora_target_modules"] = list(config.model.lora_target_modules)
-        if config.model.max_model_len is not None:
-            kwargs["max_model_len"] = config.model.max_model_len
-        if config.model.max_num_seqs is not None:
-            kwargs["max_num_seqs"] = config.model.max_num_seqs
-
-        # Model config overrides (e.g. MTP-3 → MTP-1 for Step-3.5-Flash).
-        if config.model.hf_overrides:
-            kwargs["hf_overrides"] = config.model.hf_overrides
-
-        # FP8 models: let vLLM handle quantisation natively.
-        # For native FP8 models (quantization_config in config.json), vLLM
-        # auto-detects — we only need to set quantization="fp8" explicitly
-        # when the user requests on-the-fly FP8 quantization of a BF16 model.
-        is_fp8 = config.model.quant_method and config.model.quant_method.value == "fp8"
-        if is_fp8:
-            kwargs["quantization"] = "fp8"
-        # Note: native FP8 models (MiniMax-M2.5, Qwen3.5-*-FP8) ship with
-        # quantization_config in their config.json, so vLLM detects FP8
-        # automatically.  We still set is_fp8=True for KV cache dtype logic.
-
-        # Also detect native FP8 models (quantization_config.quant_method="fp8"
-        # in the model's config.json) for KV cache logic.
-        if not is_fp8:
-            try:
-                from transformers import AutoConfig
-
-                _auto_cfg = AutoConfig.from_pretrained(
-                    model_id, trust_remote_code=trust
-                )
-                _qcfg = getattr(_auto_cfg, "quantization_config", None)
-                if _qcfg is None:
-                    _text_cfg = getattr(_auto_cfg, "text_config", None)
-                    if _text_cfg is not None:
-                        _qcfg = getattr(_text_cfg, "quantization_config", None)
-                if _qcfg is not None:
-                    _qm = (
-                        _qcfg
-                        if isinstance(_qcfg, dict)
-                        else getattr(_qcfg, "__dict__", {})
-                    )
-                    if _qm.get("quant_method") == "fp8":
-                        is_fp8 = True
-            except Exception:
-                pass
-
-        # KV cache dtype: auto-detect for FP8 on H100+, or use explicit config.
-        kv_dtype = config.model.kv_cache_dtype
-        if kv_dtype is None and is_fp8:
-            # Auto: use fp8_e4m3 KV cache on H100+ (SM >= 90) for 2x KV capacity.
-            if torch.cuda.is_available():
-                cc = torch.cuda.get_device_capability(0)
-                if cc[0] >= 9:
-                    kv_dtype = "fp8_e4m3"
-        if kv_dtype is not None:
-            kwargs["kv_cache_dtype"] = kv_dtype
 
         self.llm = LLM(**kwargs)
         self.tokenizer = self.llm.get_tokenizer()

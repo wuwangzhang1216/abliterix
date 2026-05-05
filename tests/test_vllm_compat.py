@@ -41,6 +41,22 @@ def test_parse_version_handles_dev_suffix():
     assert _parse_version("0.18.0+cu130") == (0, 18, 0)
 
 
+def test_parse_version_strips_v_prefix():
+    """PR #21 review item 6: ``v0.20.1`` should parse to (0, 20, 1).
+    Although ``importlib.metadata.version`` never returns the prefix,
+    callers may pass it directly; we should accept it."""
+    assert _parse_version("v0.20.1") == (0, 20, 1)
+    assert _parse_version("v0.18.0") == (0, 18, 0)
+    # Without lstrip("v") this used to return (0,) — the parser would
+    # see no leading digits and bail.
+    assert _parse_version("v0.20.1") != (0,)
+
+
+def test_check_vllm_version_accepts_v_prefix():
+    """check_vllm_version should also tolerate the ``v`` prefix end-to-end."""
+    assert check_vllm_version("v0.20.1") == (0, 20, 1)
+
+
 def test_parse_version_handles_short():
     assert _parse_version("1.0") == (1, 0)
     assert _parse_version("2") == (2,)

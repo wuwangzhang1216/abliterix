@@ -36,8 +36,9 @@ _REQUIRED_ENV_RPC: tuple[tuple[str, str], ...] = (
 
 def _parse_version(spec: str) -> tuple[int, ...]:
     """Parse a vLLM version string into a comparable tuple. Handles dev/rc
-    suffixes by taking the leading numeric prefix only."""
-    head = spec.split("+", 1)[0]
+    suffixes by taking the leading numeric prefix only, and tolerates an
+    optional ``v`` prefix (``v0.20.1`` → ``(0, 20, 1)``)."""
+    head = spec.split("+", 1)[0].lstrip("v")
     parts: list[int] = []
     for chunk in head.split("."):
         digits = ""
