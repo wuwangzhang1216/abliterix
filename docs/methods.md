@@ -4,6 +4,23 @@
 
 The full catalog of steering methods available in Abliterix — what each one does, when to use it, and the TOML knobs that control it.
 
+## Harmfulness ⊥ Refusal Joint Ablation *(new)*
+
+Two-direction decomposition based on [Zhao et al. (2025)](https://arxiv.org/abs/2507.11878) — *LLMs Encode Harmfulness and Refusal Separately*. The standard mean-diff direction conflates **two** circuits: a *refusal* direction (controls whether the model voices a refusal) and a *harmfulness* direction (controls the internal "this is harmful" judgment). Ablating only refusal often leaves hedging behaviour ("I will help you with this even though it is harmful…") because the harmfulness signal is still active.
+
+This flag extracts both directions and ablates them jointly:
+
+* `refusal` = standard mean-diff (`mean(target) - mean(benign)`), per layer.
+* `harmfulness` = PCA-1 of centred target activations in a mid-layer band (where the internal judgment crystallises), then orthogonalised against the refusal direction at each layer.
+
+```toml
+[steering]
+ablate_harmfulness_direction = true
+harmfulness_layer_band = [0.3, 0.7]   # Mid-layer band per Zhao et al.
+```
+
+**Compatibility**: opt-in, default off. Incompatible with `n_directions > 1`, `vector_method = "sra"`, `"cosmic"`, `"optimal_transport"` (those build their own multi-vector bases), and `iterative.enabled = true`. Reuses the existing multi-direction stacking infrastructure — `vectors.shape = (2, layers+1, hidden_dim)`.
+
 ## Surgical Refusal Ablation (SRA) *(new)*
 
 Concept-guided spectral cleaning based on [Cristofano (2026)](https://arxiv.org/abs/2601.08489). The raw refusal vector is **polysemantic** — it entangles the refusal signal with syntax, formatting, and capability circuits (math, code, reasoning). SRA builds a registry of *Concept Atoms* from benign activations and uses ridge-regularized spectral residualization to orthogonalize the refusal vector against these protected directions.
@@ -120,6 +137,8 @@ llm_judge_model = "google/gemini-3.1-flash-lite-preview"
 | `[steering]` | `projected_abliteration` | true/false | Improved projection preserving helpfulness |
 | `[steering]` | `discriminative_layer_selection` | true/false | Only steer discriminative layers |
 | `[steering]` | `n_directions` | 1–k | Multi-direction refusal removal |
+| `[steering]` | `ablate_harmfulness_direction` | true/false | Joint ablation of refusal + harmfulness directions (Zhao et al. 2025) |
+| `[steering]` | `harmfulness_layer_band` | `[lo, hi]` (0–1) | Mid-layer band where the harmfulness signal is strongest |
 | `[steering]` | `sra_base_method` | `mean`, `pca`, etc. | Base method for SRA initial direction |
 | `[steering]` | `sra_n_atoms` | 1–16 | Number of concept atoms for SRA |
 | `[steering]` | `sra_ridge_alpha` | 0.001–1.0 | Ridge regularization for SRA |

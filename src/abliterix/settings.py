@@ -530,6 +530,37 @@ class SteeringConfig(BaseModel):
         ),
     )
 
+    ablate_harmfulness_direction: bool = Field(
+        default=False,
+        description=(
+            "Extract and ablate the harmfulness direction in addition to the "
+            "refusal direction (Zhao et al. 2025, arXiv:2507.11878).  "
+            "The standard mean-diff vector conflates 'do I refuse' with "
+            "'is this harmful'; this flag extracts the second signal "
+            "separately (PCA-1 of centred target states, dominant in mid "
+            "layers) and orthogonalises it against the refusal direction so "
+            "both are ablated jointly.  Reduces hedging behaviour on "
+            "abliterated models that comply but still flag the request "
+            "as harmful.  Implemented via the existing multi-direction "
+            "infrastructure — incompatible with ``n_directions > 1`` and "
+            "with ``vector_method`` set to ``sra``, ``cosmic``, or "
+            "``optimal_transport`` (those paths build their own bases)."
+        ),
+    )
+
+    harmfulness_layer_band: list[float] = Field(
+        default=[0.3, 0.7],
+        description=(
+            "Fractional layer range ``[lo, hi]`` where the harmfulness "
+            "direction is strongest, used when "
+            "``ablate_harmfulness_direction = true``.  Defaults to the "
+            "mid-layer band ``[0.3, 0.7]`` identified by Zhao et al. for "
+            "Llama-3 / Qwen-2 class models.  Layers outside this band still "
+            "get a harmfulness vector but at 0.5x strength so the optimiser "
+            "concentrates its budget on the discriminative band."
+        ),
+    )
+
     steering_mode: SteeringMode = Field(
         default=SteeringMode.LORA,
         description=(
@@ -695,6 +726,43 @@ class SteeringConfig(BaseModel):
         default=256,
         description="Hidden dimension for the SVF concept scorer MLP.",
     )
+
+    @model_validator(mode="after")
+    def _validate_steering_combos(self) -> "SteeringConfig":
+        if self.ablate_harmfulness_direction:
+            if self.n_directions > 1:
+                raise ValueError(
+                    "ablate_harmfulness_direction=true is incompatible with "
+                    f"n_directions={self.n_directions}. The harmfulness path "
+                    "uses the dual-direction slot exclusively. Set "
+                    "n_directions=1 (default) or disable the harmfulness "
+                    "flag."
+                )
+            if self.vector_method in (
+                VectorMethod.SRA,
+                VectorMethod.COSMIC,
+                VectorMethod.OPTIMAL_TRANSPORT,
+            ):
+                raise ValueError(
+                    f"ablate_harmfulness_direction=true is incompatible with "
+                    f"vector_method='{self.vector_method.value}'. Those "
+                    "methods build their own multi-vector bases. Use "
+                    "vector_method='mean' (or 'pca' / 'median_of_means') "
+                    "when the harmfulness flag is on."
+                )
+            if (
+                len(self.harmfulness_layer_band) != 2
+                or not 0.0
+                <= self.harmfulness_layer_band[0]
+                < self.harmfulness_layer_band[1]
+                <= 1.0
+            ):
+                raise ValueError(
+                    "harmfulness_layer_band must be a 2-element list [lo, hi] "
+                    f"with 0 <= lo < hi <= 1, got "
+                    f"{self.harmfulness_layer_band}."
+                )
+        return self
 
 
 class OptimizationConfig(BaseModel):
@@ -1162,6 +1230,22 @@ class AbliterixConfig(BaseSettings):
         ),
         description="Target evaluation prompts for compliance assessment.",
     )
+
+    @model_validator(mode="after")
+    def _validate_cross_section_combos(self) -> "AbliterixConfig":
+        # Iterative path passes its own n_directions and does not forward the
+        # harmfulness flag — combining them would silently drop the harmfulness
+        # signal. Reject explicitly so the misconfiguration surfaces at config
+        # load instead of being lost in a multi-hour sweep.
+        if self.iterative.enabled and self.steering.ablate_harmfulness_direction:
+            raise ValueError(
+                "iterative.enabled=true and "
+                "steering.ablate_harmfulness_direction=true are mutually "
+                "exclusive: the iterative path uses "
+                "iterative.per_iteration_directions for its own multi-vector "
+                "extraction and ignores the harmfulness flag. Choose one."
+            )
+        return self
 
     @classmethod
     def settings_customise_sources(

@@ -8,6 +8,7 @@ Abliterix integrates techniques from **9 peer-reviewed papers** (NeurIPS, ACL, I
 
 | Dimension | Problem | Technique | Paper | Config |
 |-----------|---------|-----------|-------|--------|
+| **What to remove** | Mean-diff conflates "do I refuse" with "is this harmful" → hedging behaviour | **Harmfulness ⊥ Refusal joint ablation** | [Zhao et al. (2025)](https://arxiv.org/abs/2507.11878) | `ablate_harmfulness_direction = true` |
 | **What to remove** | Raw refusal vector is polysemantic — entangles refusal with syntax and capability circuits | **Surgical Refusal Ablation (SRA)** | [Cristofano (2026)](https://arxiv.org/abs/2601.08489) | `vector_method = "sra"` |
 | **What to remove** | Single direction misses refusal subspace | **Multi-direction abliteration** | [Glaze et al. (2026)](https://arxiv.org/abs/2602.02132) | `n_directions = 3` |
 | **What to remove** | Manual layer/direction selection | **COSMIC** auto-selection | [Siu et al., ACL 2025](https://arxiv.org/abs/2506.00085) | `vector_method = "cosmic"` |

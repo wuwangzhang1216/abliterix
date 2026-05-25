@@ -198,6 +198,8 @@ def _run_optimisation(
             sra_base_method=config.steering.sra_base_method,
             sra_n_atoms=config.steering.sra_n_atoms,
             sra_ridge_alpha=config.steering.sra_ridge_alpha,
+            ablate_harmfulness_direction=config.steering.ablate_harmfulness_direction,
+            harmfulness_layer_band=tuple(config.steering.harmfulness_layer_band),
         )
         _session.steering_vectors = vectors
 
