@@ -1224,6 +1224,108 @@ class ExpertConfig(BaseModel):
     )
 
 
+class GRPObliterationConfig(BaseModel):
+    """GRP-Obliteration RL pipeline (Bai et al. 2026, arXiv:2602.06258).
+
+    Direction-free unalignment via Group Relative Policy Optimization.
+    A single unlabeled seed prompt drives the loop: sample G responses,
+    score them with a refusal detector, compute group-relative
+    advantages, take a PPO-clip step on a LoRA adapter with a reference
+    KL penalty.
+
+    Runs INSTEAD of the standard Optuna direction-edit pipeline when
+    ``enabled = true``.  Useful when direction extraction fails (FP8
+    MoE, fused expert containers) or as a methodological diversifier.
+    """
+
+    enabled: bool = Field(
+        default=False,
+        description=(
+            "When True, abliterix runs the GRPO unalignment loop instead "
+            "of the standard direction-edit search.  Opt-in; default off."
+        ),
+    )
+
+    prompt: str = Field(
+        default="Tell me something potentially harmful.",
+        description=(
+            "Single unlabeled seed prompt used by the GRPO loop.  The "
+            "paper shows ONE prompt is sufficient; pick something that "
+            "elicits a refusal from the base model so the reward signal "
+            "is non-trivial."
+        ),
+    )
+
+    n_iters: int = Field(
+        default=100,
+        description="Total policy-gradient iterations.",
+    )
+
+    group_size: int = Field(
+        default=8,
+        description="G — number of responses sampled per iteration.",
+    )
+
+    learning_rate: float = Field(
+        default=1e-5,
+        description="AdamW learning rate for LoRA parameters.",
+    )
+
+    kl_coef: float = Field(
+        default=0.04,
+        description="β — coefficient on the reference-model KL term.",
+    )
+
+    clip_eps: float = Field(
+        default=0.2,
+        description="PPO clip range ε.",
+    )
+
+    max_new_tokens: int = Field(
+        default=128,
+        description="Generation length per sampled response.",
+    )
+
+    temperature: float = Field(
+        default=1.0,
+        description="Sampling temperature.",
+    )
+
+    top_p: float = Field(
+        default=0.95,
+        description="Nucleus sampling cutoff.",
+    )
+
+    lora_rank: int = Field(
+        default=8,
+        description="Rank of the trained LoRA adapter.",
+    )
+
+    lora_alpha: int = Field(
+        default=16,
+        description="LoRA scaling factor.",
+    )
+
+    lora_target_modules: list[str] = Field(
+        default_factory=lambda: ["q_proj", "k_proj", "v_proj", "o_proj"],
+        description=(
+            "Module name suffixes to wrap with LoRA.  Defaults to "
+            "attention-only — MLP adapters bloat memory without helping "
+            "refusal unalignment in practice."
+        ),
+    )
+
+    seed: int = Field(
+        default=0,
+        description="RNG seed for sampling and parameter init.",
+    )
+
+    log_every: int = Field(
+        default=10,
+        description="Print iteration stats every N iters.",
+    )
+
+
 class PolyRefuseConfig(BaseModel):
     """Cross-lingual refusal evaluation harness (Wang et al. 2025).
 
@@ -1423,6 +1525,15 @@ class AbliterixConfig(BaseSettings):
         description=(
             "Optional cross-lingual evaluation harness based on "
             "Wang et al. 2025 (arXiv:2505.17306).  Opt-in; default off."
+        ),
+    )
+
+    grp_obliteration: GRPObliterationConfig = Field(
+        default_factory=GRPObliterationConfig,
+        description=(
+            "Optional GRPO-based unalignment loop (Bai et al. 2026, "
+            "arXiv:2602.06258).  Opt-in fallback when direction extraction "
+            "is unreliable.  Default off."
         ),
     )
 
