@@ -711,6 +711,52 @@ class SteeringConfig(BaseModel):
         ),
     )
 
+    # --- SOM (Self-Organising Map directions) settings ---
+
+    som_grid_h: int = Field(
+        default=3,
+        description=(
+            "SOM grid height when vector_method = 'som'.  Total refusal "
+            "directions = som_grid_h * som_grid_w (default 3x3 = 9).  "
+            "Piras et al. AAAI 2026 (arXiv:2511.08379) show that "
+            "correlated SOM-derived directions outperform top-k SVD on "
+            "the same n_directions budget."
+        ),
+    )
+
+    som_grid_w: int = Field(
+        default=3,
+        description="SOM grid width when vector_method = 'som'.",
+    )
+
+    som_n_iters: int = Field(
+        default=500,
+        description=(
+            "Kohonen training iterations per layer.  Each iter picks one "
+            "random harmful sample and updates the BMU + its neighbourhood.  "
+            "500-1000 is usually enough at hidden_dim = 4K, more for larger "
+            "models."
+        ),
+    )
+
+    som_initial_lr: float = Field(
+        default=0.5,
+        description=(
+            "Initial Kohonen learning rate, decayed exponentially toward "
+            "lr * 0.01 over training.  Lower values (0.2-0.3) give more "
+            "stable but less expressive codebooks."
+        ),
+    )
+
+    som_seed: int = Field(
+        default=0,
+        description=(
+            "RNG seed for SOM init and sample-order draws.  Reused per layer "
+            "after offset by layer index for deterministic per-layer "
+            "decorrelation."
+        ),
+    )
+
     # --- SVF (Steering Vector Fields) settings ---
 
     svf_scorer_epochs: int = Field(

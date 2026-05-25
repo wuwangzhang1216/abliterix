@@ -24,6 +24,7 @@ class VectorMethod(str, Enum):
     OPTIMAL_TRANSPORT = "optimal_transport"
     COSMIC = "cosmic"
     SRA = "sra"
+    SOM = "som"
 
 
 class DecayKernel(str, Enum):

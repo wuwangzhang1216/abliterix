@@ -4,6 +4,21 @@
 
 The full catalog of steering methods available in Abliterix — what each one does, when to use it, and the TOML knobs that control it.
 
+## SOM Directions *(new — multi-direction non-orthogonal basis)*
+
+Implements [Piras et al., AAAI 2026 (arXiv:2511.08379)](https://arxiv.org/abs/2511.08379) — *SOM Directions Are Better Than One*. The standard `n_directions` mode forces orthogonality via Gram-Schmidt; SOM trains a small Kohonen grid on harmful representations and uses each node's centroid (minus the benign mean) as a candidate direction. The resulting directions are **correlated**, not orthogonal — capturing the low-dimensional manifold structure the paper identifies, with stronger refusal suppression than top-k SVD on the same n-direction budget.
+
+```toml
+[steering]
+vector_method = "som"
+som_grid_h = 3
+som_grid_w = 3      # 3x3 = 9 directions per layer
+som_n_iters = 500
+som_initial_lr = 0.5
+```
+
+Output shape `(n_dirs, layers+1, hidden_dim)` matches the existing multi-direction conventions, so all downstream LoRA / direct paths work without modification.
+
 ## ORBA & Biprojected Direct-Mode Transforms *(new)*
 
 Two direct-mode weight transforms ported from [grimjim](https://huggingface.co/blog/grimjim/orthogonal-reflection-bounded-ablation), which has been topping the UGI / NatInt abliteration leaderboards with these variants.
@@ -166,7 +181,9 @@ llm_judge_model = "google/gemini-3.1-flash-lite-preview"
 
 | Section | Option | Values | Description |
 |---------|--------|--------|-------------|
-| `[steering]` | `vector_method` | `mean`, `median_of_means`, `pca`, `optimal_transport`, `cosmic`, `sra` | How to compute steering vectors |
+| `[steering]` | `vector_method` | `mean`, `median_of_means`, `pca`, `optimal_transport`, `cosmic`, `sra`, `som` | How to compute steering vectors |
+| `[steering]` | `som_grid_h` / `som_grid_w` | int | SOM grid shape (default 3×3 = 9 directions) |
+| `[steering]` | `som_n_iters` | int | Kohonen training iterations per layer |
 | `[steering]` | `steering_mode` | `lora`, `direct`, `angular`, `adaptive_angular`, `spherical`, `vector_field` | Steering application strategy (`direct` for double-norm architectures like Gemma 4) |
 | `[steering]` | `projected_abliteration` | true/false | Improved projection preserving helpfulness |
 | `[steering]` | `discriminative_layer_selection` | true/false | Only steer discriminative layers |

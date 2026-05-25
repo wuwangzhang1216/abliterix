@@ -708,6 +708,11 @@ def run():
                 sra_ridge_alpha=config.steering.sra_ridge_alpha,
                 ablate_harmfulness_direction=config.steering.ablate_harmfulness_direction,
                 harmfulness_layer_band=tuple(config.steering.harmfulness_layer_band),
+                som_grid_h=config.steering.som_grid_h,
+                som_grid_w=config.steering.som_grid_w,
+                som_n_iters=config.steering.som_n_iters,
+                som_initial_lr=config.steering.som_initial_lr,
+                som_seed=config.steering.som_seed,
             )
 
         analyzer = ResidualAnalyzer(config, engine, benign_states, target_states)

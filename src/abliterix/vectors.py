@@ -166,6 +166,11 @@ def compute_steering_vectors(
     sra_ridge_alpha: float = 0.01,
     ablate_harmfulness_direction: bool = False,
     harmfulness_layer_band: tuple[float, float] = (0.3, 0.7),
+    som_grid_h: int = 3,
+    som_grid_w: int = 3,
+    som_n_iters: int = 500,
+    som_initial_lr: float = 0.5,
+    som_seed: int = 0,
 ) -> Tensor:
     """Derive per-layer steering vectors from benign and target residuals.
 
@@ -275,6 +280,21 @@ def compute_steering_vectors(
             vectors = vectors - proj.unsqueeze(1) * benign_dir
             vectors = F.normalize(vectors, p=2, dim=1)
         return vectors
+
+    if method == VectorMethod.SOM:
+        from .som import compute_som_directions
+
+        return compute_som_directions(
+            benign_states,
+            target_states,
+            grid_h=som_grid_h,
+            grid_w=som_grid_w,
+            n_iters=som_n_iters,
+            initial_lr=som_initial_lr,
+            seed=som_seed,
+            orthogonal_projection=orthogonal_projection,
+            projected_abliteration=projected_abliteration,
+        )
 
     if method == VectorMethod.SRA:
         from .sra import compute_sra_vectors
