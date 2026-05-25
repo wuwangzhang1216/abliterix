@@ -59,12 +59,17 @@ class ParetoPoint:
 
 
 def _extract_objectives(trial) -> tuple[float, float] | None:
-    """Pull (refusal, KL) from a FrozenTrial; returns None for incomplete trials."""
+    """Pull ``(refusal, KL)`` from a FrozenTrial; returns None for incomplete trials.
+
+    The optimiser declares directions ``[MINIMIZE, MINIMIZE]`` for both
+    objectives, and ``scorer._compute_objectives`` returns
+    ``(divergence_objective, compliance_objective)`` — i.e. ``(KL, refusal)``.
+    We swap the order here so the rest of this module can use the more
+    natural ``(refusal, KL)`` semantics.
+    """
     if trial.values is None or len(trial.values) < 2:
         return None
-    # The optimiser declares directions [MINIMIZE, MINIMIZE] for both,
-    # and the order is (refusal, KL) per `scorer._compute_objectives`.
-    refusal, kl = float(trial.values[0]), float(trial.values[1])
+    kl, refusal = float(trial.values[0]), float(trial.values[1])
     return refusal, kl
 
 

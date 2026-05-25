@@ -14,8 +14,14 @@ from abliterix.pareto import (
 
 
 def _trial(number, refusal=None, kl=None, params=None, user_attrs=None):
-    """Lightweight stand-in for optuna.trial.FrozenTrial."""
-    values = None if refusal is None else (refusal, kl)
+    """Lightweight stand-in for optuna.trial.FrozenTrial.
+
+    Mirrors abliterix's scorer convention: ``values = (kl, compliance)``
+    where compliance is the refusal-rate. The test API still accepts
+    ``refusal`` and ``kl`` kwargs for readability — we just swap them
+    into ``values`` in the order the optimiser writes them.
+    """
+    values = None if refusal is None else (kl, refusal)
     return SimpleNamespace(
         number=number,
         values=values,
