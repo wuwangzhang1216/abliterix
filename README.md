@@ -158,6 +158,7 @@ The deep details live in `docs/` and `benchmarks/`:
 - **[docs/configuration.md](docs/configuration.md)** — config loading order, the 150+ shipped configs, the Web UI, and research-mode visualization.
 - **[docs/datasets.md](docs/datasets.md)** — bilingual dataset design rationale and metadata schema.
 - **[docs/references.md](docs/references.md)** — paper references and BibTeX.
+- **[docs/benchmarks/2026-05-pod-validation.md](docs/benchmarks/2026-05-pod-validation.md)** — measured 10-feature sweep on Qwen2.5-7B-Instruct with LLM judge (Blackwell GPU).
 - **[benchmarks/SPEC.md](benchmarks/SPEC.md)** — the frozen HonestAbliterationBench contract (`spec_version 1.0`).
 - **[benchmarks/CONTRIBUTING.md](benchmarks/CONTRIBUTING.md)** — how to submit a leaderboard row (self-reported / verified tiers).
 
