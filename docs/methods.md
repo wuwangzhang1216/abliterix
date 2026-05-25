@@ -61,6 +61,24 @@ direct_transform_preserve_row_norm = true    # ORBA post-step row-norm clamp
 
 The standard transform remains the default; opt in to ORBA / biprojected only when you want UGI-leaderboard-style row-norm fidelity.
 
+## SAFEx Stability-Based MoE Expert Identification *(new)*
+
+[Yi et al., 2025 (arXiv:2506.17368)](https://arxiv.org/abs/2506.17368) — *SAFEx: Identifying Safety-Critical Experts*. The historical abliterix profiler scores experts by `mean(target_rate) − mean(benign_rate)` which picks up experts that fire *on average* more for harmful prompts but doesn't distinguish *stable* safety experts (fire on ~every harmful prompt) from sporadic ones. SAFEx adds a variance penalty:
+
+```
+score(e) = (μ_target − μ_benign) − λ · σ_target
+```
+
+where `σ_target` is the per-prompt activation-rate standard deviation across harmful prompts. Stable experts (high mean, low variance) win; sporadic experts are demoted. The paper reports ~12 stable experts → 22 % refusal drop.
+
+```toml
+[experts]
+profiling_method = "safex"          # 'standard' (default) or 'safex'
+safex_variance_penalty = 1.0        # λ; higher = harder on noisy experts
+```
+
+Opt-in (default = `standard`). Returns the same `{layer: [(expert, score), ...]}` shape so the downstream EGA / router-suppression code stays unchanged.
+
 ## Cliff-Head Ablation *(new — reasoning models)*
 
 Inverts the safety-head finding from [Bao et al. (2025)](https://arxiv.org/abs/2510.06036) — *Refusal Falls Off a Cliff: How Safety Alignment Fails in Reasoning Models*. In reasoning models (R1, o-style, Qwen3-Thinking, Kimi-Thinking) refusal intent stays strong during the `<think>` trace but **collapses** at the final answer tokens — and a sparse ~3 % of attention heads carry this signal. The paper ablates *anti*-refusal heads to recover safety; abliterix ablates the *pro*-refusal heads to remove it.

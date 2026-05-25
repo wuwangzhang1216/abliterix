@@ -823,7 +823,19 @@ def run():
         ):
             print()
             print("Profiling MoE expert activations...")
-            safety_experts = engine.identify_safety_experts(benign_msgs, target_msgs)
+            if config.experts.profiling_method == "safex":
+                from .safex import identify_safety_experts_safex
+
+                safety_experts = identify_safety_experts_safex(
+                    engine,
+                    benign_msgs,
+                    target_msgs,
+                    variance_penalty=config.experts.safex_variance_penalty,
+                )
+            else:
+                safety_experts = engine.identify_safety_experts(
+                    benign_msgs, target_msgs
+                )
 
         # ----- TP backend: Phase transition (vLLM or SGLang) -----
         tp_gen = None

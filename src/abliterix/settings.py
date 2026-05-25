@@ -1200,6 +1200,29 @@ class ExpertConfig(BaseModel):
         description="Search interval [lo, hi] for per-expert down-projection steering weight.",
     )
 
+    profiling_method: str = Field(
+        default="standard",
+        description=(
+            "Safety-expert scoring strategy.  'standard' uses the historical "
+            "abliterix risk-difference: target_freq − benign_freq.  'safex' "
+            "uses Yi et al. 2025 (arXiv:2506.17368) stability-aware scoring: "
+            "(μ_target − μ_benign) − λ · σ_target, where σ_target is the "
+            "per-prompt activation-rate standard deviation across harmful "
+            "prompts.  Penalises noisy / sporadic experts and surfaces the "
+            "stable detection / control experts the paper identifies."
+        ),
+    )
+
+    safex_variance_penalty: float = Field(
+        default=1.0,
+        description=(
+            "λ in the SAFEx stability score.  Higher = harder on unstable "
+            "experts (rewards low harmful-prompt activation variance).  "
+            "Defaults to 1.0 per the paper recipe.  Ignored when "
+            "profiling_method = 'standard'."
+        ),
+    )
+
 
 class IterativeConfig(BaseModel):
     """Settings for iterative (multi-pass) abliteration against hardened models.
