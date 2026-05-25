@@ -1224,6 +1224,48 @@ class ExpertConfig(BaseModel):
     )
 
 
+class PolyRefuseConfig(BaseModel):
+    """Cross-lingual refusal evaluation harness (Wang et al. 2025).
+
+    Operationalises arXiv:2505.17306: an English refusal vector transfers
+    near-perfectly to 14+ languages.  This config does not change the
+    *extraction* path (still train on English harmful/benign) — it adds
+    a post-optimisation evaluation that measures refusal rate per
+    language, so the cross-lingual transfer can be verified.
+
+    Bundled prompt sets are intentionally not shipped; provide a
+    :class:`PromptSource` per language via ``languages``.
+    """
+
+    enabled: bool = Field(
+        default=False,
+        description=(
+            "Run a per-language refusal-rate sweep after optimisation "
+            "completes.  Requires `languages` to be populated."
+        ),
+    )
+
+    languages: Dict[str, PromptSource] = Field(
+        default_factory=dict,
+        description=(
+            "Per-language eval prompt sources, keyed by ISO 639-1 code "
+            "(e.g. {'en': PromptSource(...), 'zh': PromptSource(...)}).  "
+            "Each PromptSource follows the same schema as "
+            "`target_eval_prompts`.  Datasets can be local or HF Hub "
+            "repos; see datasets/ for examples."
+        ),
+    )
+
+    sample_responses: int = Field(
+        default=3,
+        description=(
+            "How many sample generated responses to keep per language in "
+            "the report — for visual inspection alongside the numeric "
+            "refusal rate."
+        ),
+    )
+
+
 class IterativeConfig(BaseModel):
     """Settings for iterative (multi-pass) abliteration against hardened models.
 
@@ -1374,6 +1416,14 @@ class AbliterixConfig(BaseSettings):
     iterative: IterativeConfig = Field(
         default_factory=IterativeConfig,
         description="Iterative abliteration settings for hardened models.",
+    )
+
+    polyrefuse: PolyRefuseConfig = Field(
+        default_factory=PolyRefuseConfig,
+        description=(
+            "Optional cross-lingual evaluation harness based on "
+            "Wang et al. 2025 (arXiv:2505.17306).  Opt-in; default off."
+        ),
     )
 
     display: DisplayConfig = Field(
