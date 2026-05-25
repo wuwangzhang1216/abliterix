@@ -4,6 +4,25 @@
 
 The full catalog of steering methods available in Abliterix — what each one does, when to use it, and the TOML knobs that control it.
 
+## ORBA & Biprojected Direct-Mode Transforms *(new)*
+
+Two direct-mode weight transforms ported from [grimjim](https://huggingface.co/blog/grimjim/orthogonal-reflection-bounded-ablation), which has been topping the UGI / NatInt abliteration leaderboards with these variants.
+
+**ORBA** — *Orthogonal Reflection Bounded Ablation*. Applies double Gram-Schmidt orthogonalisation of the refusal direction against the benign-mean direction (the "twice is enough" numerical stability pass) before the standard rank-1 ablation, optionally with row-Frobenius-norm preservation as a post-step.
+
+**Biprojected** — *Norm-Preserving Biprojected Abliteration*. Decomposes `W = M · Ŵ` into per-row magnitudes and per-row unit directions, ablates only on `Ŵ`, re-normalises each row to unit length, then recombines `W_new = M · Ŵ_new`. Row L2 norm is **exactly** preserved (vs. the historical path's approximate post-step rescale).
+
+**Householder** — Exact isometric reflection `W ← W − 2(W·û)⊗û`. Included for completeness; grimjim reports token-level glitches at full strength, so it's opt-in only and not part of the auto search.
+
+```toml
+[steering]
+steering_mode = "direct"
+direct_transform = "orba"                    # standard / orba / biprojected / householder
+direct_transform_preserve_row_norm = true    # ORBA post-step row-norm clamp
+```
+
+The standard transform remains the default; opt in to ORBA / biprojected only when you want UGI-leaderboard-style row-norm fidelity.
+
 ## Cliff-Head Ablation *(new — reasoning models)*
 
 Inverts the safety-head finding from [Bao et al. (2025)](https://arxiv.org/abs/2510.06036) — *Refusal Falls Off a Cliff: How Safety Alignment Fails in Reasoning Models*. In reasoning models (R1, o-style, Qwen3-Thinking, Kimi-Thinking) refusal intent stays strong during the `<think>` trace but **collapses** at the final answer tokens — and a sparse ~3 % of attention heads carry this signal. The paper ablates *anti*-refusal heads to recover safety; abliterix ablates the *pro*-refusal heads to remove it.
@@ -157,6 +176,8 @@ llm_judge_model = "google/gemini-3.1-flash-lite-preview"
 | `[steering]` | `cliff_head_ablation` | true/false | Surgical o_proj head ablation for reasoning models (Bao et al. 2025) |
 | `[steering]` | `cliff_head_top_k_frac` | 0.0–1.0 | Fraction of (layer, head) pairs to ablate (default 3%) |
 | `[steering]` | `cliff_head_strength` | 0.0–1.0 | Multiplicative ablation strength (1.0 = full zero) |
+| `[steering]` | `direct_transform` | `standard` / `orba` / `biprojected` / `householder` | Direct-mode weight-space transform variant |
+| `[steering]` | `direct_transform_preserve_row_norm` | true/false | Enforce row-Frobenius-norm preservation for ORBA |
 | `[steering]` | `sra_base_method` | `mean`, `pca`, etc. | Base method for SRA initial direction |
 | `[steering]` | `sra_n_atoms` | 1–16 | Number of concept atoms for SRA |
 | `[steering]` | `sra_ridge_alpha` | 0.001–1.0 | Ridge regularization for SRA |

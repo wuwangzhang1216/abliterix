@@ -24,11 +24,13 @@ from torch import Tensor
 from ..settings import AbliterixConfig
 from ..types import (
     DecayKernel,
+    DirectTransform,
     ExpertRoutingConfig,
     SteeringMode,
     SteeringProfile,
     WeightNorm,
 )
+from ..weight_transforms import apply_direct_transform
 
 # Avoid circular import: accept the engine as a duck-typed object rather
 # than importing SteeringEngine directly.  The caller is responsible for
@@ -250,6 +252,7 @@ def apply_steering(
             profiles,
             config,
             discriminative_layers,
+            benign_states=benign_states,
         )
         # Expert-Granular Abliteration: project refusal direction from ALL
         # expert down_proj slices, not just top-N safety experts.  This is
@@ -515,6 +518,8 @@ def _apply_direct_steering(
     profiles: dict[str, SteeringProfile],
     config: AbliterixConfig,
     discriminative_layers: set[int] | None,
+    *,
+    benign_states: Tensor | None = None,
 ):
     """Modify base weights in-place via norm-preserving orthogonal projection.
 
@@ -531,6 +536,22 @@ def _apply_direct_steering(
     Weight originals are cached on the engine for restore_baseline().
     """
     kernel = config.steering.decay_kernel
+    direct_transform = config.steering.direct_transform
+    preserve_row_norm = config.steering.direct_transform_preserve_row_norm
+
+    # Pre-compute per-layer benign direction (input space) once when an
+    # advanced transform that needs the double-GS pre-step is selected.
+    # benign_states shape: (n_benign, layers+1, hidden_dim).
+    benign_dirs: Tensor | None = None
+    if (
+        direct_transform in (DirectTransform.ORBA, DirectTransform.HOUSEHOLDER)
+        and benign_states is not None
+    ):
+        benign_mean = benign_states.mean(dim=0).to(torch.float32)  # (layers+1, dim)
+        benign_norms = torch.linalg.vector_norm(benign_mean, dim=1, keepdim=True).clamp(
+            min=1e-8
+        )
+        benign_dirs = benign_mean / benign_norms
 
     # Cache originals for restore_baseline.
     if not hasattr(engine, "_direct_weight_originals"):
@@ -609,6 +630,38 @@ def _apply_direct_steering(
                     else:
                         v = global_vector.to(device)
                     vf = v.to(torch.float32)
+
+                    # Advanced grimjim transforms (ORBA / biprojected / Householder)
+                    # only handle input-side ablation. Use them when the
+                    # direction matches in_f; otherwise fall back to the
+                    # standard math below.
+                    if (
+                        direct_transform != DirectTransform.STANDARD
+                        and vf.shape[0] == in_f
+                    ):
+                        bdir: Tensor | None = None
+                        if benign_dirs is not None and benign_dirs.shape[1] == in_f:
+                            bdir = benign_dirs[layer_idx + 1].to(device)
+                        # Householder / ORBA require benign_dir; if we don't
+                        # have one (benign_states wasn't kept past the
+                        # extraction phase), fall through to standard.
+                        if (
+                            direct_transform
+                            in (DirectTransform.ORBA, DirectTransform.HOUSEHOLDER)
+                            and bdir is None
+                        ):
+                            pass  # fall through to standard path below
+                        else:
+                            W_new = apply_direct_transform(
+                                direct_transform,
+                                W,
+                                vf,
+                                bdir,
+                                strength=strength,
+                                preserve_row_norm=preserve_row_norm,
+                            )
+                            weight.data = W_new.to(weight.dtype)
+                            continue
 
                     # Orthogonal projection: remove the refusal direction from W.
                     # W has shape (out_features, in_features).

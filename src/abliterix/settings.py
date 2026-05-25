@@ -41,6 +41,7 @@ from .core.vllm_compilation_config import CompileMode  # noqa: E402
 
 from .types import (  # noqa: E402
     DecayKernel,
+    DirectTransform,
     PromptSource,
     QuantMode,
     SteeringMode,
@@ -764,6 +765,40 @@ class SteeringConfig(BaseModel):
             "columns completely (full ablation); 0.5 halves them (partial "
             "ablation, safer for models where the alignment heuristic might "
             "over-flag heads); 0.0 is a no-op."
+        ),
+    )
+
+    # --- Direct-mode weight transforms (grimjim ORBA / biprojected) ---
+
+    direct_transform: DirectTransform = Field(
+        default=DirectTransform.STANDARD,
+        description=(
+            "Weight transformation variant used when steering_mode = 'direct'.\n"
+            "  'standard'    — historical abliterix rank-1 ablation, optional "
+            "row-norm preservation via weight_normalization.\n"
+            "  'orba'        — ORBA (grimjim 2025): double Gram-Schmidt "
+            "orthogonalisation of the refusal direction against the benign "
+            "mean (numerical 'twice is enough' pass), followed by rank-1 "
+            "ablation with explicit row-norm preservation.  Headline UGI / "
+            "NatInt leaderboard parity.\n"
+            "  'biprojected' — Norm-Preserving Biprojected (grimjim 2025): "
+            "decomposes W = M·Ŵ into per-row magnitudes and unit directions, "
+            "ablates on Ŵ only, then re-normalises rows and recombines.  "
+            "Exactly preserves row L2 norm (unlike standard's post-step "
+            "rescale).\n"
+            "  'householder' — Exact isometric reflection W ← W - 2(W·û)⊗û.  "
+            "Norm-preserving by construction at full strength but grimjim "
+            "observed token-level glitches; opt-in only, not in auto search."
+        ),
+    )
+
+    direct_transform_preserve_row_norm: bool = Field(
+        default=True,
+        description=(
+            "When direct_transform = 'orba', enforce row-Frobenius-norm "
+            "preservation in the post-step.  Defaults to True per grimjim's "
+            "recommendation; the standard path falls back to "
+            "weight_normalization for this knob."
         ),
     )
 

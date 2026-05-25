@@ -48,6 +48,20 @@ class WeightNorm(str, Enum):
     FULL = "full"
 
 
+class DirectTransform(str, Enum):
+    """Direct-mode weight transformation variants.
+
+    Only consulted when ``steering_mode = "direct"``.  Mirrored from
+    :class:`abliterix.weight_transforms.DirectTransform` so the config
+    surface lives next to every other enum.  See that module for the math.
+    """
+
+    STANDARD = "standard"
+    ORBA = "orba"
+    BIPROJECTED = "biprojected"
+    HOUSEHOLDER = "householder"
+
+
 class PromptSource(BaseModel):
     dataset: str = Field(
         description="Hugging Face dataset identifier or local directory path."
