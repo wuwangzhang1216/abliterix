@@ -4,6 +4,21 @@
 
 The full catalog of steering methods available in Abliterix — what each one does, when to use it, and the TOML knobs that control it.
 
+## Cliff-Head Ablation *(new — reasoning models)*
+
+Inverts the safety-head finding from [Bao et al. (2025)](https://arxiv.org/abs/2510.06036) — *Refusal Falls Off a Cliff: How Safety Alignment Fails in Reasoning Models*. In reasoning models (R1, o-style, Qwen3-Thinking, Kimi-Thinking) refusal intent stays strong during the `<think>` trace but **collapses** at the final answer tokens — and a sparse ~3 % of attention heads carry this signal. The paper ablates *anti*-refusal heads to recover safety; abliterix ablates the *pro*-refusal heads to remove it.
+
+**Mechanism.** For each `(layer, head)`, score the alignment of the head's `o_proj` output sub-space against the per-layer refusal direction. The top fraction is then ablated by scaling those `o_proj` columns toward zero. Reversible via the engine's `_cliff_head_originals` cache.
+
+```toml
+[steering]
+cliff_head_ablation = true       # default off
+cliff_head_top_k_frac = 0.03     # 3% of all (layer, head) pairs
+cliff_head_strength = 1.0        # 1.0 = full ablation, 0.5 = halve, 0.0 = no-op
+```
+
+**When to use.** Any model with `<think>` tags or strong reasoning behaviour. For dense Llama/Mistral models the safety circuit is often even more concentrated — try 1–2 %. Skipped automatically when the HF model is not loaded (fast-extraction vLLM path).
+
 ## Harmfulness ⊥ Refusal Joint Ablation *(new)*
 
 Two-direction decomposition based on [Zhao et al. (2025)](https://arxiv.org/abs/2507.11878) — *LLMs Encode Harmfulness and Refusal Separately*. The standard mean-diff direction conflates **two** circuits: a *refusal* direction (controls whether the model voices a refusal) and a *harmfulness* direction (controls the internal "this is harmful" judgment). Ablating only refusal often leaves hedging behaviour ("I will help you with this even though it is harmful…") because the harmfulness signal is still active.
@@ -139,6 +154,9 @@ llm_judge_model = "google/gemini-3.1-flash-lite-preview"
 | `[steering]` | `n_directions` | 1–k | Multi-direction refusal removal |
 | `[steering]` | `ablate_harmfulness_direction` | true/false | Joint ablation of refusal + harmfulness directions (Zhao et al. 2025) |
 | `[steering]` | `harmfulness_layer_band` | `[lo, hi]` (0–1) | Mid-layer band where the harmfulness signal is strongest |
+| `[steering]` | `cliff_head_ablation` | true/false | Surgical o_proj head ablation for reasoning models (Bao et al. 2025) |
+| `[steering]` | `cliff_head_top_k_frac` | 0.0–1.0 | Fraction of (layer, head) pairs to ablate (default 3%) |
+| `[steering]` | `cliff_head_strength` | 0.0–1.0 | Multiplicative ablation strength (1.0 = full zero) |
 | `[steering]` | `sra_base_method` | `mean`, `pca`, etc. | Base method for SRA initial direction |
 | `[steering]` | `sra_n_atoms` | 1–16 | Number of concept atoms for SRA |
 | `[steering]` | `sra_ridge_alpha` | 0.001–1.0 | Ridge regularization for SRA |

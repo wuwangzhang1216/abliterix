@@ -735,6 +735,56 @@ def run():
                 f"* Trained scorers for [bold]{len(engine._concept_scorers)}[/] layers"
             )
 
+        # Cliff-head ablation (Bao et al. 2025, arXiv:2510.06036).
+        # Surgically scale toward zero the o_proj columns of the attention
+        # heads most aligned with the refusal direction. Applied once before
+        # the optimizer search, on the HF model. Skipped when running under
+        # the fast-extraction vLLM path that unloads the HF model (cliff-head
+        # editing of vLLM tensors is a separate path not yet implemented).
+        if config.steering.cliff_head_ablation:
+            if engine.model is None:
+                print(
+                    "[yellow]Cliff-head ablation requested but HF model is "
+                    "not loaded — skipping. This typically means the "
+                    "fast-extraction vLLM path is active; cliff-head support "
+                    "for vLLM-only mode is on the roadmap.[/]"
+                )
+            else:
+                from .cliff_head import run_cliff_head_ablation
+
+                print()
+                print(
+                    "Applying cliff-head ablation "
+                    f"(top {config.steering.cliff_head_top_k_frac:.1%}, "
+                    f"strength {config.steering.cliff_head_strength:.2f})..."
+                )
+                n_modified, heads = run_cliff_head_ablation(
+                    engine,
+                    vectors,
+                    top_k_frac=config.steering.cliff_head_top_k_frac,
+                    strength=config.steering.cliff_head_strength,
+                )
+                if n_modified:
+                    by_layer: dict[int, int] = {}
+                    for h in heads:
+                        by_layer[h.layer] = by_layer.get(h.layer, 0) + 1
+                    top_layers = sorted(
+                        by_layer.items(), key=lambda x: x[1], reverse=True
+                    )[:5]
+                    layer_brief = ", ".join(
+                        f"L{layer}×{count}" for layer, count in top_layers
+                    )
+                    print(
+                        f"* Ablated [bold]{n_modified}[/] attention heads "
+                        f"across {len(by_layer)} layers (top: {layer_brief})"
+                    )
+                else:
+                    print(
+                        "[yellow]Cliff-head ablation matched no heads — "
+                        "check num_attention_heads / head_dim divisibility "
+                        "for this architecture.[/]"
+                    )
+
         # Keep residual states if needed for discriminative layer selection
         # or angular steering; otherwise free memory.
         _keep_states = (

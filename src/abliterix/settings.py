@@ -727,8 +727,59 @@ class SteeringConfig(BaseModel):
         description="Hidden dimension for the SVF concept scorer MLP.",
     )
 
+    # --- Cliff-head ablation (reasoning models) ---
+
+    cliff_head_ablation: bool = Field(
+        default=False,
+        description=(
+            "Surgically scale toward zero the o_proj columns of the attention "
+            "heads most aligned with the refusal direction (Bao et al. 2025, "
+            "arXiv:2510.06036).  In reasoning models a sparse set of heads "
+            "carries the refusal signal; ablating ~3% of them flips the "
+            "behaviour without touching MLP weights.  Applied once before "
+            "the Optuna search loop on the HF model.  Reversible via the "
+            "engine's _cliff_head_originals cache.  Requires a loaded HF "
+            "model (skipped when running fast-extraction vLLM with no HF "
+            "model in memory).  Recommended for any model with <think> "
+            "tags (R1, o-style, Qwen3-Thinking, Kimi-Thinking) where the "
+            "refusal cliff effect is strongest."
+        ),
+    )
+
+    cliff_head_top_k_frac: float = Field(
+        default=0.03,
+        description=(
+            "Fraction of all (layer, head) pairs to ablate when "
+            "cliff_head_ablation = true.  Bao et al. report ~3% is sufficient "
+            "in reasoning models; tune downward (1-2%) for dense Llama / "
+            "Mistral models where safety is even more concentrated, or "
+            "upward (5-10%) for models that distribute safety more widely."
+        ),
+    )
+
+    cliff_head_strength: float = Field(
+        default=1.0,
+        description=(
+            "Multiplicative ablation strength.  1.0 zeroes the head's o_proj "
+            "columns completely (full ablation); 0.5 halves them (partial "
+            "ablation, safer for models where the alignment heuristic might "
+            "over-flag heads); 0.0 is a no-op."
+        ),
+    )
+
     @model_validator(mode="after")
     def _validate_steering_combos(self) -> "SteeringConfig":
+        if self.cliff_head_ablation:
+            if not 0.0 < self.cliff_head_top_k_frac <= 1.0:
+                raise ValueError(
+                    "cliff_head_top_k_frac must be in (0, 1], got "
+                    f"{self.cliff_head_top_k_frac}."
+                )
+            if not 0.0 <= self.cliff_head_strength <= 1.0:
+                raise ValueError(
+                    "cliff_head_strength must be in [0, 1], got "
+                    f"{self.cliff_head_strength}."
+                )
         if self.ablate_harmfulness_direction:
             if self.n_directions > 1:
                 raise ValueError(
