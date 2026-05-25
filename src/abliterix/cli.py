@@ -1142,6 +1142,35 @@ def run():
                     f"(would be ~100x slower).  Fix the backend installation and retry."
                 )
 
+        # Precompute alternative steering tensors when the optimiser is
+        # asked to search the harmfulness ⊥ refusal flag as a categorical.
+        # The pair-variant uses the existing harmfulness extractor and
+        # plugs into the multi-direction code path downstream.
+        _vector_variants: dict | None = None
+        if (
+            config.steering.search_harmfulness_direction
+            and benign_states is not None
+            and target_states is not None
+        ):
+            from .harmfulness import extract_harm_refusal_pair
+
+            print()
+            print(
+                "Precomputing harmfulness-pair variant for the optimiser "
+                "(search_harmfulness_direction=true)..."
+            )
+            pair_vectors = extract_harm_refusal_pair(
+                benign_states,
+                target_states,
+                layer_band=tuple(config.steering.harmfulness_layer_band),
+                orthogonal_projection=config.steering.orthogonal_projection,
+                projected_abliteration=config.steering.projected_abliteration,
+            )
+            _vector_variants = {
+                "single": vectors,
+                "harmfulness_pair": pair_vectors,
+            }
+
         study = run_search(
             config,
             engine,
@@ -1151,6 +1180,7 @@ def run():
             storage,
             benign_states=benign_states,
             target_states=target_states,
+            steering_vector_variants=_vector_variants,
         )
 
         if config.non_interactive:

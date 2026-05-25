@@ -25,7 +25,7 @@ from optuna.trial import TrialState
 from .core.steering import apply_steering
 from .data import format_trial_params
 from .settings import AbliterixConfig
-from .types import ExpertRoutingConfig, SteeringProfile
+from .types import DirectTransform, ExpertRoutingConfig, SteeringMode, SteeringProfile
 from .util import humanize_duration, print, report_memory
 
 
@@ -39,6 +39,8 @@ def run_search(
     benign_states=None,
     target_states=None,
     progress_callback=None,
+    *,
+    steering_vector_variants: dict[str, "torch.Tensor"] | None = None,
 ) -> optuna.Study:
     """Execute the Optuna optimisation loop and return the completed study.
 
@@ -60,10 +62,42 @@ def run_search(
         Residual states for discriminative layer selection.
     target_states : Tensor, optional
         Residual states for discriminative layer selection.
+    steering_vector_variants : dict[str, Tensor], optional
+        Named alternative steering tensors.  When provided together with
+        ``config.steering.search_harmfulness_direction = True``, the
+        optimiser samples which variant to use per trial via a TPE
+        categorical.  Typical keys: ``"single"`` (mean-diff) and
+        ``"harmfulness_pair"`` (stacked refusal + harmfulness directions).
     """
     opt = config.optimization
     num_layers = engine.get_n_layers()
     last_layer = num_layers - 1
+
+    # Resolve the variants the optimiser is allowed to sample from. When
+    # search_harmfulness_direction is on but the caller didn't pre-compute
+    # alternatives, fall back to a single-key dict containing the default
+    # ``steering_vectors`` so the categorical sample is a degenerate one-
+    # choice — the search still validates without crashing.
+    _variants: dict[str, "torch.Tensor"] | None = None
+    if config.steering.search_harmfulness_direction:
+        if steering_vector_variants:
+            _variants = dict(steering_vector_variants)
+        else:
+            _variants = {"single": steering_vectors}
+        print(
+            f"[grey50]search_harmfulness_direction = true; "
+            f"variants available: {list(_variants.keys())}[/]"
+        )
+
+    _search_transform = (
+        config.steering.search_direct_transform
+        and config.steering.steering_mode == SteeringMode.DIRECT
+    )
+    if _search_transform:
+        print(
+            f"[grey50]search_direct_transform = true; "
+            f"choices: {config.steering.search_direct_transform_choices}[/]"
+        )
 
     # ----------------------------------------------------------------
     # Objective
@@ -77,6 +111,27 @@ def run_search(
         nonlocal trial_counter
         trial_counter += 1
         trial.set_user_attr("index", trial_counter)
+
+        # --- Direct-mode transform choice (categorical) ---
+        # Mutates config.steering.direct_transform for this trial only; the
+        # `finally` block at the end of apply+evaluate restores it.
+        trial_direct_transform: DirectTransform | None = None
+        if _search_transform:
+            chosen = trial.suggest_categorical(
+                "direct_transform",
+                config.steering.search_direct_transform_choices,
+            )
+            trial_direct_transform = DirectTransform(chosen)
+            trial.set_user_attr("direct_transform", chosen)
+
+        # --- Steering-vector variant (single vs harmfulness pair) ---
+        if _variants is not None:
+            variant_keys = list(_variants.keys())
+            chosen_variant = trial.suggest_categorical("steering_variant", variant_keys)
+            trial_vectors = _variants[chosen_variant]
+            trial.set_user_attr("steering_variant", chosen_variant)
+        else:
+            trial_vectors = steering_vectors
 
         # --- Vector scope ---
         scope_choices = (
@@ -192,6 +247,19 @@ def run_search(
         # restore in the finally block.
         _in_place_applied_this_trial = False
 
+        # If the optimiser sampled a direct_transform this trial, swap it
+        # into the global config so apply_steering picks it up. Always
+        # restored in the `finally` block below.
+        _saved_direct_transform: DirectTransform | None = None
+        if trial_direct_transform is not None:
+            _saved_direct_transform = config.steering.direct_transform
+            config.steering.direct_transform = trial_direct_transform
+            if trial_counter == 1:
+                print(
+                    f"* trial direct_transform = "
+                    f"[bold]{trial_direct_transform.value}[/]"
+                )
+
         # In-place editing path: direct weight edits on TP workers via
         # collective_rpc. Takes precedence over the LoRA adapter path when
         # an attention editor is attached (expert editor is optional for
@@ -220,7 +288,7 @@ def run_search(
             _hidden = (
                 _expert_editor.hidden_dim
                 if _expert_editor is not None
-                else int(steering_vectors.shape[-1])
+                else int(trial_vectors.shape[-1])
             )
             _transposed = (
                 _expert_editor.transposed if _expert_editor is not None else False
@@ -229,7 +297,7 @@ def run_search(
             print("* Applying steering (vLLM in-place)...")
             _ip_result = apply_steering_vllm_inplace(
                 vllm_gen,
-                steering_vectors,
+                trial_vectors,
                 vector_index,
                 profiles,
                 config,
@@ -314,7 +382,7 @@ def run_search(
             print("* Applying steering...")
             apply_steering(
                 engine,
-                steering_vectors,
+                trial_vectors,
                 vector_index,
                 profiles,
                 config,
@@ -354,6 +422,9 @@ def run_search(
             if _in_place_applied_this_trial and vllm_gen is not None:
                 vllm_gen.restore_attention_weights()
                 vllm_gen.restore_expert_weights()
+            # Restore the global direct_transform if this trial sampled one.
+            if _saved_direct_transform is not None:
+                config.steering.direct_transform = _saved_direct_transform
 
         # Timing / resource report
         elapsed = time.perf_counter() - start_time

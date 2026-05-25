@@ -880,6 +880,41 @@ class SteeringConfig(BaseModel):
         ),
     )
 
+    # --- Optuna search-space extensions ---
+
+    search_direct_transform: bool = Field(
+        default=False,
+        description=(
+            "Sample ``direct_transform`` (standard / orba / biprojected) as "
+            "a TPE categorical dimension.  Only active when steering_mode = "
+            "'direct'.  When True, abliterix sweeps the three transforms in "
+            "the same Optuna study so the Pareto front exposes which one "
+            "wins on the current model.  Opt-in; default off preserves the "
+            "historical behaviour of using ``direct_transform`` as a fixed "
+            "global setting."
+        ),
+    )
+
+    search_direct_transform_choices: list[str] = Field(
+        default_factory=lambda: ["standard", "orba", "biprojected"],
+        description=(
+            "Restrict the categorical sample for ``search_direct_transform``.  "
+            "Default sweeps the three grimjim variants; drop 'biprojected' or "
+            "'orba' to skip them, or add 'householder' to enable the "
+            "exact-reflection variant in the search."
+        ),
+    )
+
+    search_harmfulness_direction: bool = Field(
+        default=False,
+        description=(
+            "Sample the harmfulness ⊥ refusal flag as a TPE boolean.  When "
+            "True, abliterix pre-computes both the single-direction (mean-"
+            "diff) and dual-direction (harmfulness pair) steering tensors "
+            "once, and the optimiser picks per trial.  Opt-in; default off."
+        ),
+    )
+
     @model_validator(mode="after")
     def _validate_steering_combos(self) -> "SteeringConfig":
         if self.vector_method == VectorMethod.SAE:
