@@ -713,6 +713,9 @@ def run():
                 som_n_iters=config.steering.som_n_iters,
                 som_initial_lr=config.steering.som_initial_lr,
                 som_seed=config.steering.som_seed,
+                sae_path=config.steering.sae_path,
+                sae_layer=config.steering.sae_layer,
+                sae_top_k=config.steering.sae_top_k,
             )
 
         analyzer = ResidualAnalyzer(config, engine, benign_states, target_states)

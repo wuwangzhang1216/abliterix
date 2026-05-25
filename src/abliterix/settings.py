@@ -757,6 +757,38 @@ class SteeringConfig(BaseModel):
         ),
     )
 
+    # --- SAE (Sparse Autoencoder feature basis) settings ---
+
+    sae_path: str | None = Field(
+        default=None,
+        description=(
+            "Local path to a pre-trained SAE checkpoint (.pt / .pth / .bin / "
+            ".safetensors) used when vector_method = 'sae'.  The loader "
+            "auto-detects common encoder/decoder key names (W_enc/W_dec, "
+            "encoder.weight/decoder.weight, etc.); see abliterix.sae for "
+            "the supported set.  Must match the model's hidden_dim or load "
+            "fails fast.  Required when vector_method = 'sae'."
+        ),
+    )
+
+    sae_layer: int = Field(
+        default=0,
+        description=(
+            "0-based transformer layer the SAE was trained on, used when "
+            "vector_method = 'sae'.  Refusal features are read off this "
+            "layer's residual stream; non-SAE layers fall back to mean-diff."
+        ),
+    )
+
+    sae_top_k: int = Field(
+        default=8,
+        description=(
+            "Number of top-scoring SAE features to use as refusal "
+            "directions.  Hong et al. 2025 report 4-16 features cover the "
+            "refusal feature family in Gemma-Scope / Llama-Scope SAEs."
+        ),
+    )
+
     # --- SVF (Steering Vector Fields) settings ---
 
     svf_scorer_epochs: int = Field(
@@ -850,6 +882,16 @@ class SteeringConfig(BaseModel):
 
     @model_validator(mode="after")
     def _validate_steering_combos(self) -> "SteeringConfig":
+        if self.vector_method == VectorMethod.SAE:
+            if not self.sae_path:
+                raise ValueError(
+                    "vector_method='sae' requires steering.sae_path pointing "
+                    "at a pre-trained SAE checkpoint."
+                )
+            if self.sae_layer < 0:
+                raise ValueError(f"sae_layer must be >= 0, got {self.sae_layer}.")
+            if self.sae_top_k <= 0:
+                raise ValueError(f"sae_top_k must be > 0, got {self.sae_top_k}.")
         if self.cliff_head_ablation:
             if not 0.0 < self.cliff_head_top_k_frac <= 1.0:
                 raise ValueError(

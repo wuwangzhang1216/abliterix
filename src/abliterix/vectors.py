@@ -171,6 +171,9 @@ def compute_steering_vectors(
     som_n_iters: int = 500,
     som_initial_lr: float = 0.5,
     som_seed: int = 0,
+    sae_path: str | None = None,
+    sae_layer: int = 0,
+    sae_top_k: int = 8,
 ) -> Tensor:
     """Derive per-layer steering vectors from benign and target residuals.
 
@@ -280,6 +283,26 @@ def compute_steering_vectors(
             vectors = vectors - proj.unsqueeze(1) * benign_dir
             vectors = F.normalize(vectors, p=2, dim=1)
         return vectors
+
+    if method == VectorMethod.SAE:
+        if sae_path is None:
+            raise ValueError(
+                "vector_method='sae' requires sae_path to be set "
+                "(SteeringConfig.sae_path)."
+            )
+        from .sae import compute_sae_steering_directions, load_sae
+
+        sae = load_sae(sae_path, hidden_dim=target_states.shape[-1])
+        directions, _scores = compute_sae_steering_directions(
+            sae,
+            benign_states,
+            target_states,
+            sae_layer=sae_layer,
+            top_k=sae_top_k,
+            orthogonal_projection=orthogonal_projection,
+            projected_abliteration=projected_abliteration,
+        )
+        return directions
 
     if method == VectorMethod.SOM:
         from .som import compute_som_directions

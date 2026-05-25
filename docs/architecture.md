@@ -8,6 +8,7 @@ Abliterix integrates techniques from **9 peer-reviewed papers** (NeurIPS, ACL, I
 
 | Dimension | Problem | Technique | Paper | Config |
 |-----------|---------|-----------|-------|--------|
+| **What to remove** | Mean-diff picks a polysemantic direction; SAE features are an interpretable basis | **SAE-feature-basis steering** | [Hong et al. (2025)](https://arxiv.org/abs/2509.09708) | `vector_method = "sae"` |
 | **What to remove** | Mean-diff conflates "do I refuse" with "is this harmful" → hedging behaviour | **Harmfulness ⊥ Refusal joint ablation** | [Zhao et al. (2025)](https://arxiv.org/abs/2507.11878) | `ablate_harmfulness_direction = true` |
 | **What to remove** | Reasoning models hide refusal in a sparse <3% of attention heads — MLP-only edits miss them | **Cliff-head ablation** (o_proj column zero-out) | [Bao et al. (2025)](https://arxiv.org/abs/2510.06036) | `cliff_head_ablation = true` |
 | **What to remove** | Raw refusal vector is polysemantic — entangles refusal with syntax and capability circuits | **Surgical Refusal Ablation (SRA)** | [Cristofano (2026)](https://arxiv.org/abs/2601.08489) | `vector_method = "sra"` |

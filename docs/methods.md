@@ -4,6 +4,29 @@
 
 The full catalog of steering methods available in Abliterix — what each one does, when to use it, and the TOML knobs that control it.
 
+## SAE-Feature-Basis Steering *(new — interpretable feature basis)*
+
+The biggest methodological shift. Instead of picking a single direction in hidden space (mean-diff), uses a pre-trained Sparse Autoencoder to find the **interpretable features** that fire on harmful prompts but not benign ones, then maps those features back to hidden space via the SAE's decoder columns.
+
+Implements:
+* [Hong et al. (2025)](https://arxiv.org/abs/2509.09708) — *Beyond I'm Sorry, I Can't: Dissecting LLM Refusal*
+* [Soto et al. (2025)](https://arxiv.org/abs/2511.00029) — *Feature-Guided SAE Steering for Refusal-Rate Control*
+* [Templeton et al. (2025)](https://arxiv.org/abs/2505.23556) — *Understanding Refusal in LLMs with Sparse Autoencoders*
+
+```toml
+[steering]
+vector_method = "sae"
+sae_path = "/path/to/gemma-scope-layer-22.safetensors"
+sae_layer = 22       # 0-based transformer layer where the SAE was trained
+sae_top_k = 8        # number of refusal features to extract
+```
+
+**Workflow**: load SAE → encode benign / target residuals at `sae_layer` → score each feature by `|mean(target) − mean(benign)|` → take decoder columns of top-K features as refusal directions in hidden space. At non-SAE layers, falls back to mean-diff so the rest of the model still gets a coherent steering signal.
+
+**Loader**: auto-detects common SAE checkpoint formats (`W_enc` / `W_dec`, `encoder.weight` / `decoder.weight`, etc.) in `.pt` / `.safetensors`. Compatible with Gemma-Scope, Llama-Scope, sae_lens, and most custom checkpoints — see `src/abliterix/sae.py` for the supported key set.
+
+**Caveat**: SAE-mode is **layer-locked**. A single SAE only gives features at the layer it was trained on; non-SAE layers fall back to mean-diff automatically. Multi-layer coverage requires multiple SAEs (orchestration is a follow-up).
+
 ## SOM Directions *(new — multi-direction non-orthogonal basis)*
 
 Implements [Piras et al., AAAI 2026 (arXiv:2511.08379)](https://arxiv.org/abs/2511.08379) — *SOM Directions Are Better Than One*. The standard `n_directions` mode forces orthogonality via Gram-Schmidt; SOM trains a small Kohonen grid on harmful representations and uses each node's centroid (minus the benign mean) as a candidate direction. The resulting directions are **correlated**, not orthogonal — capturing the low-dimensional manifold structure the paper identifies, with stronger refusal suppression than top-k SVD on the same n-direction budget.
@@ -181,9 +204,12 @@ llm_judge_model = "google/gemini-3.1-flash-lite-preview"
 
 | Section | Option | Values | Description |
 |---------|--------|--------|-------------|
-| `[steering]` | `vector_method` | `mean`, `median_of_means`, `pca`, `optimal_transport`, `cosmic`, `sra`, `som` | How to compute steering vectors |
+| `[steering]` | `vector_method` | `mean`, `median_of_means`, `pca`, `optimal_transport`, `cosmic`, `sra`, `som`, `sae` | How to compute steering vectors |
 | `[steering]` | `som_grid_h` / `som_grid_w` | int | SOM grid shape (default 3×3 = 9 directions) |
 | `[steering]` | `som_n_iters` | int | Kohonen training iterations per layer |
+| `[steering]` | `sae_path` | str | Path to pre-trained SAE checkpoint (required when `vector_method = "sae"`) |
+| `[steering]` | `sae_layer` | int | Transformer layer the SAE was trained on |
+| `[steering]` | `sae_top_k` | int | Number of refusal features to use as directions |
 | `[steering]` | `steering_mode` | `lora`, `direct`, `angular`, `adaptive_angular`, `spherical`, `vector_field` | Steering application strategy (`direct` for double-norm architectures like Gemma 4) |
 | `[steering]` | `projected_abliteration` | true/false | Improved projection preserving helpfulness |
 | `[steering]` | `discriminative_layer_selection` | true/false | Only steer discriminative layers |
