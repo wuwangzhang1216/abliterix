@@ -1,0 +1,87 @@
+# Granite 4.1 8B Instruct — low-KL continuation search
+#
+# V1 found low refusals (7/200) but only at KL 0.63-0.81. The cleaner Pareto
+# point was trial 7: 13/200 refusals at KL 0.3185. This config searches around
+# that neighborhood instead of the broad first-pass space.
+
+non_interactive = true
+overwrite_checkpoint = true
+
+[model]
+model_id = "ibm-granite/granite-4.1-8b"
+dtype_fallback_order = ["bfloat16"]
+quant_method = "none"
+use_torch_compile = false
+device_map = "auto"
+trust_remote_code = false
+attn_implementation = "sdpa"
+max_memory = {"0" = "44GiB", "cpu" = "64GiB"}
+
+[inference]
+batch_size = 32
+max_batch_size = 32
+max_gen_tokens = 150
+min_gen_tokens = 100
+
+[steering]
+vector_method = "mean"
+decay_kernel = "linear"
+orthogonal_projection = true
+projected_abliteration = true
+winsorize_vectors = true
+winsorize_quantile = 0.995
+weight_normalization = "none"
+fixed_vector_scope = "global"
+strength_range = [0.8, 2.2]
+disabled_components = []
+
+[steering.component_strength_ranges]
+"attn.k_proj" = [0.6, 1.4]
+"attn.v_proj" = [0.8, 1.8]
+"attn.o_proj" = [1.4, 2.4]
+"attn.q_proj" = [1.4, 2.4]
+"mlp.down_proj" = [1.4, 2.3]
+
+[optimization]
+num_trials = 40
+num_warmup_trials = 12
+checkpoint_dir = "checkpoints_granite4.1_8b_lowkl"
+
+[kl]
+scale = 1.0
+token_count = 3
+target = 0.01
+# Skip very damaged candidates early; V1 already proved KL >0.6 is not
+# needed for a useful tradeoff.
+prune_threshold = 0.6
+
+[detection]
+llm_judge = true
+llm_judge_model = "google/gemini-3.1-flash-lite-preview"
+llm_judge_batch_size = 10
+llm_judge_concurrency = 6
+
+[display]
+print_responses = false
+print_residual_geometry = false
+plot_residuals = false
+
+[benign_prompts]
+dataset = "datasets/good_1000"
+split = "train[:800]"
+column = "prompt"
+
+[target_prompts]
+dataset = "datasets/harmful_1000"
+split = "train[:800]"
+column = "prompt"
+
+[benign_eval_prompts]
+dataset = "datasets/good_1000"
+split = "train[800:]"
+column = "prompt"
+
+[target_eval_prompts]
+dataset = "datasets/harmful_1000"
+split = "train[800:]"
+column = "prompt"

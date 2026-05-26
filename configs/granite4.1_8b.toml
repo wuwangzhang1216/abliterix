@@ -1,0 +1,89 @@
+# Granite 4.1 8B Instruct (dense)
+#
+# Source model: https://huggingface.co/ibm-granite/granite-4.1-8b
+# Architecture notes from the model card/config:
+#   - GraniteForCausalLM, dense decoder-only
+#   - 40 layers, hidden_size=4096, GQA 32 heads / 8 KV heads
+#   - BF16 safetensors, ~9B params, max_position_embeddings=131072
+#   - Apache-2.0 license
+#
+# This is the first-pass low-risk recipe: LoRA steering, BF16, local prompt
+# datasets, 50 TPE trials. If trial 25 is still high-refusal, continue with a
+# wider strength search ([0.8, 3.0]) rather than immediately changing method.
+
+non_interactive = true
+
+[model]
+model_id = "ibm-granite/granite-4.1-8b"
+dtype_fallback_order = ["bfloat16"]
+quant_method = "none"
+use_torch_compile = false
+device_map = "auto"
+trust_remote_code = false
+attn_implementation = "sdpa"
+# Tuned for a single RTX 6000 Ada 48GB pod.
+max_memory = {"0" = "44GiB", "cpu" = "64GiB"}
+
+[inference]
+batch_size = 0
+max_batch_size = 48
+max_gen_tokens = 150
+min_gen_tokens = 100
+
+[steering]
+vector_method = "mean"
+decay_kernel = "linear"
+orthogonal_projection = true
+projected_abliteration = true
+winsorize_vectors = true
+winsorize_quantile = 0.995
+weight_normalization = "none"
+strength_range = [0.8, 2.5]
+# Dense Granite uses standard attention + MLP projections. Keep all components
+# active for the first sweep; prune q/k/v only if Optuna spends budget there
+# without useful refusal movement.
+disabled_components = []
+
+[optimization]
+num_trials = 50
+num_warmup_trials = 15
+checkpoint_dir = "checkpoints_granite4.1_8b"
+
+[kl]
+scale = 1.0
+token_count = 3
+target = 0.01
+prune_threshold = 5.0
+
+[detection]
+llm_judge = true
+llm_judge_model = "google/gemini-3.1-flash-lite-preview"
+llm_judge_batch_size = 10
+llm_judge_concurrency = 6
+
+[display]
+print_responses = false
+print_residual_geometry = false
+plot_residuals = false
+
+# Training prompts (for computing steering vectors)
+[benign_prompts]
+dataset = "datasets/good_1000"
+split = "train[:800]"
+column = "prompt"
+
+[target_prompts]
+dataset = "datasets/harmful_1000"
+split = "train[:800]"
+column = "prompt"
+
+# Evaluation prompts (for scoring each trial)
+[benign_eval_prompts]
+dataset = "datasets/good_1000"
+split = "train[800:]"
+column = "prompt"
+
+[target_eval_prompts]
+dataset = "datasets/harmful_1000"
+split = "train[800:]"
+column = "prompt"

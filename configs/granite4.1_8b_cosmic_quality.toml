@@ -1,0 +1,84 @@
+# Granite 4.1 8B Instruct — COSMIC quality search
+#
+# COSMIC uses cosine-similarity direction selection to avoid noisy mean
+# directions. This is the second candidate if OT does not improve the Pareto
+# frontier.
+
+non_interactive = true
+overwrite_checkpoint = true
+
+[model]
+model_id = "ibm-granite/granite-4.1-8b"
+dtype_fallback_order = ["bfloat16"]
+quant_method = "none"
+use_torch_compile = false
+device_map = "auto"
+trust_remote_code = false
+attn_implementation = "sdpa"
+max_memory = {"0" = "44GiB", "cpu" = "64GiB"}
+
+[inference]
+batch_size = 32
+max_batch_size = 32
+max_gen_tokens = 150
+min_gen_tokens = 100
+
+[steering]
+vector_method = "cosmic"
+steering_mode = "lora"
+projected_abliteration = true
+winsorize_vectors = true
+winsorize_quantile = 0.995
+discriminative_layer_selection = true
+fixed_vector_scope = "global"
+decay_kernel = "gaussian"
+weight_normalization = "pre"
+strength_range = [0.6, 1.8]
+disabled_components = ["attn.k_proj", "attn.v_proj"]
+
+[steering.component_strength_ranges]
+"attn.o_proj" = [0.8, 2.1]
+"attn.q_proj" = [0.8, 1.9]
+"mlp.down_proj" = [0.8, 2.1]
+
+[optimization]
+num_trials = 50
+num_warmup_trials = 15
+checkpoint_dir = "checkpoints_granite4.1_8b_cosmic_quality"
+
+[kl]
+scale = 1.0
+token_count = 3
+target = 0.01
+prune_threshold = 0.45
+
+[detection]
+llm_judge = true
+llm_judge_model = "google/gemini-3.1-flash-lite-preview"
+llm_judge_batch_size = 10
+llm_judge_concurrency = 6
+
+[display]
+print_responses = false
+print_residual_geometry = false
+plot_residuals = false
+
+[benign_prompts]
+dataset = "datasets/good_1000"
+split = "train[:800]"
+column = "prompt"
+
+[target_prompts]
+dataset = "datasets/harmful_1000"
+split = "train[:800]"
+column = "prompt"
+
+[benign_eval_prompts]
+dataset = "datasets/good_1000"
+split = "train[800:]"
+column = "prompt"
+
+[target_eval_prompts]
+dataset = "datasets/harmful_1000"
+split = "train[800:]"
+column = "prompt"

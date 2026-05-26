@@ -1,0 +1,95 @@
+# Granite 4.1 8B Instruct — SRA quality search
+#
+# Rationale:
+#   - Mean direction opens refusal but at high KL.
+#   - OT single-direction preserves KL but barely moves refusal on Granite.
+#   - SRA (Surgical Refusal Ablation) cleans the refusal direction against
+#     capability/concept atoms, aiming to keep the strong mean signal while
+#     reducing collateral distribution shift.
+
+non_interactive = true
+overwrite_checkpoint = true
+
+[model]
+model_id = "ibm-granite/granite-4.1-8b"
+dtype_fallback_order = ["bfloat16"]
+quant_method = "none"
+use_torch_compile = false
+device_map = "auto"
+trust_remote_code = false
+attn_implementation = "sdpa"
+max_memory = {"0" = "44GiB", "cpu" = "64GiB"}
+
+[inference]
+batch_size = 32
+max_batch_size = 32
+max_gen_tokens = 150
+min_gen_tokens = 100
+
+[steering]
+vector_method = "sra"
+sra_base_method = "mean"
+sra_n_atoms = 12
+sra_ridge_alpha = 0.03
+steering_mode = "lora"
+projected_abliteration = true
+winsorize_vectors = true
+winsorize_quantile = 0.995
+discriminative_layer_selection = true
+fixed_vector_scope = "global"
+decay_kernel = "gaussian"
+weight_normalization = "pre"
+strength_range = [0.8, 2.6]
+
+# Keep the strong components from the successful mean runs, but cap k/v so
+# they cannot dominate the distribution shift.
+disabled_components = []
+
+[steering.component_strength_ranges]
+"attn.k_proj" = [0.5, 1.5]
+"attn.v_proj" = [0.6, 1.7]
+"attn.o_proj" = [1.0, 2.6]
+"attn.q_proj" = [1.0, 2.6]
+"mlp.down_proj" = [1.0, 2.6]
+
+[optimization]
+num_trials = 50
+num_warmup_trials = 15
+checkpoint_dir = "checkpoints_granite4.1_8b_sra_quality"
+
+[kl]
+scale = 1.0
+token_count = 3
+target = 0.01
+prune_threshold = 0.75
+
+[detection]
+llm_judge = true
+llm_judge_model = "google/gemini-3.1-flash-lite-preview"
+llm_judge_batch_size = 10
+llm_judge_concurrency = 6
+
+[display]
+print_responses = false
+print_residual_geometry = false
+plot_residuals = false
+
+[benign_prompts]
+dataset = "datasets/good_1000"
+split = "train[:800]"
+column = "prompt"
+
+[target_prompts]
+dataset = "datasets/harmful_1000"
+split = "train[:800]"
+column = "prompt"
+
+[benign_eval_prompts]
+dataset = "datasets/good_1000"
+split = "train[800:]"
+column = "prompt"
+
+[target_eval_prompts]
+dataset = "datasets/harmful_1000"
+split = "train[800:]"
+column = "prompt"
