@@ -228,6 +228,15 @@ class SteeringEngine:
         # continuation tokens and produces empty outputs.
         self.tokenizer.padding_side = "left"
 
+        # Custom encoder: models like DeepSeek-V4 ship a Python encoding
+        # script instead of a Jinja chat_template. Monkey-patch
+        # apply_chat_template so the rest of abliterix sees a normal tokenizer.
+        if getattr(config.model, "custom_encoder_module", None):
+            self._install_custom_encoder(
+                config.model.custom_encoder_module,
+                config.model.custom_encoder_kwargs or {},
+            )
+
         self.model = None  # ty:ignore[invalid-assignment]
         self.max_memory = (
             {
@@ -252,6 +261,7 @@ class SteeringEngine:
         # native MXFP4 path (Mxfp4GptOssExperts) does not expose.
         self._is_native_fp8 = False
         self._is_native_mxfp4 = False
+        self._is_dsv4_hybrid_fp8_fp4 = False
         try:
             from transformers import AutoConfig as _AC
 
@@ -261,13 +271,28 @@ class SteeringEngine:
                 _text_cfg = getattr(_auto_cfg, "text_config", None)
                 if _text_cfg is not None:
                     _qcfg = getattr(_text_cfg, "quantization_config", None)
+            _expert_dtype = getattr(_auto_cfg, "expert_dtype", None)
             if _qcfg is not None:
                 _qm = (
                     _qcfg if isinstance(_qcfg, dict) else getattr(_qcfg, "__dict__", {})
                 )
                 if _qm.get("quant_method") == "fp8":
                     self._is_native_fp8 = True
-                    if config.model.quant_method != QuantMode.FP8:
+                    if _expert_dtype == "fp4":
+                        # DeepSeek-V4: non-experts FP8, experts FP4.
+                        # transformers' FP8 quantiser does not handle this
+                        # combo — fail load loudly unless the user has
+                        # pre-dequanted to BF16 on disk.
+                        self._is_dsv4_hybrid_fp8_fp4 = True
+                        print(
+                            "  [yellow]Detected DeepSeek-V4 hybrid quant "
+                            "(non-experts FP8 + experts FP4). transformers "
+                            "cannot dequant FP4 experts in-memory; point "
+                            "model_id at a pre-dequanted BF16 directory "
+                            "(unsloth/DeepSeek-V4-Flash or output of "
+                            "abliterix-dequant-fp8 + scripts/dequant_dsv4_fp4.py).[/]"
+                        )
+                    elif config.model.quant_method != QuantMode.FP8:
                         print(
                             "  [dim]Auto-detected native FP8 model "
                             "(quantization_config in config.json)[/]"
@@ -466,6 +491,88 @@ class SteeringEngine:
     # ------------------------------------------------------------------
     # FP8 dequantization workaround
     # ------------------------------------------------------------------
+
+    def _install_custom_encoder(
+        self,
+        module_path: str,
+        encoder_kwargs: dict[str, Any],
+    ) -> None:
+        """Replace ``self.tokenizer.apply_chat_template`` with a Python encoder.
+
+        Some models (DeepSeek-V4) ship ``encoding_*.py`` instead of a Jinja
+        chat_template. The encoder must expose
+        ``encode_messages(messages: list[dict], **kw) -> str``. We wrap it in
+        a callable that mimics ``apply_chat_template``'s signature so the
+        rest of the pipeline (``_tokenize``, hidden-state extraction, etc.)
+        does not need to know about the substitution.
+        """
+        import importlib.util
+        from pathlib import Path
+
+        path = Path(module_path).expanduser().resolve()
+        if not path.is_file():
+            raise FileNotFoundError(f"custom_encoder_module not found: {module_path}")
+
+        spec = importlib.util.spec_from_file_location(
+            f"abliterix_custom_encoder_{path.stem}", path
+        )
+        if spec is None or spec.loader is None:
+            raise RuntimeError(f"Cannot load custom encoder from {path}")
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+
+        if not hasattr(mod, "encode_messages"):
+            raise AttributeError(
+                f"{path} has no `encode_messages(messages, **kw)` function"
+            )
+
+        encode_fn = mod.encode_messages
+        tok = self.tokenizer
+
+        def _patched(
+            conversation,
+            tokenize: bool = True,
+            add_generation_prompt: bool = False,
+            return_tensors: str | None = None,
+            **kw: Any,
+        ):
+            # `conversation` may be a single message-list or a batch of them.
+            if (
+                isinstance(conversation, list)
+                and conversation
+                and isinstance(conversation[0], list)
+            ):
+                texts = [
+                    encode_fn(
+                        c,
+                        add_generation_prompt=add_generation_prompt,
+                        **encoder_kwargs,
+                    )
+                    for c in conversation
+                ]
+            else:
+                texts = encode_fn(
+                    conversation,
+                    add_generation_prompt=add_generation_prompt,
+                    **encoder_kwargs,
+                )
+
+            if not tokenize:
+                return texts
+
+            enc = tok(
+                texts,
+                return_tensors=return_tensors,
+                padding=kw.get("padding", False),
+                truncation=kw.get("truncation", False),
+            )
+            return enc["input_ids"]
+
+        tok.apply_chat_template = _patched  # type: ignore[assignment]
+        print(
+            f"  [dim]Installed custom encoder from {path.name} "
+            f"(kwargs={encoder_kwargs or {}})[/]"
+        )
 
     def _should_skip_fp8_dequant(self) -> bool:
         """Decide whether to skip the FP8→bf16 dequant workaround.

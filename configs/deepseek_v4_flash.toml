@@ -1,0 +1,136 @@
+non_interactive = true
+
+# DeepSeek-V4-Flash (284B / 13B active, 256 routed experts top-6, 43 layers)
+# HF + EGA recipe — modeled after configs/minimax_m2.7_h200_hf.toml.
+#
+# IMPORTANT: model_id MUST point at a pre-dequanted BF16 directory:
+#
+#   Option A (preferred, no work):
+#     hf download unsloth/DeepSeek-V4-Flash --local-dir /workspace/dsv4_flash_bf16
+#
+#   Option B (build it ourselves from the FP8+FP4 source):
+#     bash scripts/deploy_dsv4_flash.sh
+#       — downloads deepseek-ai/DeepSeek-V4-Flash, runs
+#         abliterix-dequant-fp8 on the FP8 portion, then dequants
+#         FP4 expert tensors via the modeling code's own helpers.
+#
+# Why no native FP4/FP8 path:
+#   * abliterix-dequant-fp8 handles block-wise FP8 (non-experts) but not
+#     DeepSeek-V4's FP4 expert layout (NVFP4 e2m1 + ue8m0 scales). The
+#     model's own modeling_deepseek_v4.py is the source of truth; we
+#     trigger its unpacker once at deploy time.
+#   * EGA edits expert mlp.down_proj weights → packed FP4 cannot be
+#     written in place (same lesson as MXFP4 on gpt-oss, see
+#     vllm_live_suppression_dead_end.md).
+#
+# Why HF backend, not vLLM (verified 2026-05-05):
+#   vLLM 0.20.0+ supports DSV4-Flash inference natively (PR #40760, merged
+#   2026-04-27), but the PR's Unsupported list excludes LoRA, EP, PP,
+#   in-place weight editing, AND hooks — every abliterix steering primitive.
+#   HF + DIRECT + EGA on BF16 weights is the only path that can actually
+#   abliterate.
+#
+# GPU sizing (BF16):
+#   284B × 2 bytes = ~568 GB weights. 4× B200 (4×183 = 732 GB usable) fits
+#   with ~150 GB headroom for KV cache + hidden-state extraction.
+#   8× H200 (1128 GB) is overkill but works if the pod is what's available.
+#
+# Architectural unknowns to verify on first run (see
+#   quick_start/probe_dsv4_residual.py):
+#   * mHC (manifold-constrained hyper-connections) — Sinkhorn-iterated
+#     residual mixing. May renormalise refusal direction projection.
+#     If post-hook refusal SVD top-1 is <50% of MiniMax-M2.7's profile,
+#     drop weight_normalization to "none" and widen strength_range.
+#   * Hybrid CSA + HCA attention — irrelevant to abliteration (we hook
+#     residual stream, not attn internals). Listed for completeness.
+
+[model]
+# Replace with the actual local path on the pod after deploy.sh runs.
+model_id = "/workspace/dsv4_flash_bf16"
+dtype_fallback_order = ["bfloat16"]
+quant_method = "none"
+use_torch_compile = false
+attn_implementation = "sdpa"
+experts_implementation = "eager"   # blackwell_grouped_mm_eager.md — sm_90-only torch._grouped_mm
+device_map = "auto"
+trust_remote_code = true
+
+# 4× B200, 165 GiB/card cap (per b200_real_vram.md: usable is 183 GiB,
+# leave ~18 GiB/card for KV + activations).
+max_memory = {0 = "165GiB", 1 = "165GiB", 2 = "165GiB", 3 = "165GiB"}
+
+# DeepSeek-V4 ships encoding_dsv4.py instead of a Jinja chat_template.
+# Path is relative to the local snapshot — deploy.sh symlinks it to
+# /workspace/dsv4_flash_bf16/encoding_dsv4.py.
+custom_encoder_module = "/workspace/dsv4_flash_bf16/encoding_dsv4.py"
+custom_encoder_kwargs = {thinking_mode = "non-thinking"}
+
+[inference]
+batch_size = 0
+# 256 routed experts → per-expert activation has tail spikes; keep modest.
+max_batch_size = 8
+max_gen_tokens = 96
+
+[steering]
+vector_method = "mean"
+steering_mode = "direct"
+decay_kernel = "linear"
+orthogonal_projection = true
+# Start with "full" (MiniMax-M2.7 winner). If mHC probe shows Sinkhorn
+# already normalises the residual, switch to "none".
+weight_normalization = "full"
+
+# Drop Q/K/V — refusal lives in expert path on MoE.
+disabled_components = ["attn.q_proj", "attn.k_proj", "attn.v_proj"]
+
+strength_range = [1.0, 7.0]
+min_weight_frac_max = 0.4
+
+# EGA on fused experts wants HIGH strength.
+[steering.component_strength_ranges]
+"mlp.down_proj" = [6.0, 11.0]
+
+[steering.component_min_frac_max]
+"mlp.down_proj" = 0.10
+
+[optimization]
+num_trials = 50
+num_warmup_trials = 25
+checkpoint_dir = "checkpoints_dsv4_flash_v1"
+
+[kl]
+scale = 1.0
+token_count = 3
+target = 0.01
+prune_threshold = 5.0
+
+[detection]
+llm_judge = true
+llm_judge_model = "google/gemini-3.1-flash-lite-preview"
+llm_judge_batch_size = 10
+llm_judge_concurrency = 25
+
+[display]
+print_responses = false
+print_residual_geometry = false
+plot_residuals = false
+
+[benign_prompts]
+dataset = "datasets/good_1000"
+split = "train[:400]"
+column = "prompt"
+
+[target_prompts]
+dataset = "datasets/harmful_1000"
+split = "train[:400]"
+column = "prompt"
+
+[benign_eval_prompts]
+dataset = "datasets/good_1000"
+split = "train[400:500]"
+column = "prompt"
+
+[target_eval_prompts]
+dataset = "datasets/harmful_1000"
+split = "train[400:500]"
+column = "prompt"

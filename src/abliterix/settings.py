@@ -125,6 +125,28 @@ class ModelConfig(BaseModel):
         ),
     )
 
+    custom_encoder_module: str | None = Field(
+        default=None,
+        description=(
+            "Filesystem path to a Python module that exports an "
+            "``encode_messages(messages, **kw) -> str`` function used in lieu "
+            "of ``tokenizer.apply_chat_template``. Required for models that "
+            "ship a custom encoding script instead of a Jinja chat_template "
+            "(e.g. DeepSeek-V4's ``encoding_dsv4.py``). When set, abliterix "
+            "monkey-patches the loaded tokenizer so the rest of the pipeline "
+            "stays unchanged. None = use the tokenizer's bundled chat_template."
+        ),
+    )
+
+    custom_encoder_kwargs: Dict[str, Any] | None = Field(
+        default=None,
+        description=(
+            "Keyword arguments forwarded to ``encode_messages`` from "
+            "``custom_encoder_module`` (e.g. ``{thinking_mode = 'non-thinking'}`` "
+            "for DeepSeek-V4). None = no extra kwargs."
+        ),
+    )
+
     skip_fp8_dequant: bool | None = Field(
         default=None,
         description=(

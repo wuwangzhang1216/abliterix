@@ -75,6 +75,7 @@ experiments*/
 
 # One-off scratch scripts
 /scratch/
+/.scratch/
 
 # Residual analysis plots
 /plots/
