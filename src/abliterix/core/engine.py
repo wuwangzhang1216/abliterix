@@ -290,7 +290,8 @@ class SteeringEngine:
                             "cannot dequant FP4 experts in-memory; point "
                             "model_id at a pre-dequanted BF16 directory "
                             "(unsloth/DeepSeek-V4-Flash or output of "
-                            "abliterix-dequant-fp8 + scripts/dequant_dsv4_fp4.py).[/]"
+                            "abliterix-dequant-fp8 + "
+                            "quick_start/_dsv4_dequant_fp4_experts.py).[/]"
                         )
                     elif config.model.quant_method != QuantMode.FP8:
                         print(
