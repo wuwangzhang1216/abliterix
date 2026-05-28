@@ -93,7 +93,9 @@ def _train_som(
     # Pre-compute grid coordinates: (n_nodes, 2).
     rows = torch.arange(grid_h).repeat_interleave(grid_w)
     cols = torch.arange(grid_w).repeat(grid_h)
-    grid_coords = torch.stack([rows, cols], dim=1).to(torch.float32)
+    grid_coords = torch.stack([rows, cols], dim=1).to(
+        device=data.device, dtype=torch.float32
+    )
 
     lr_floor = initial_lr * 0.01
     sigma_floor = max(initial_sigma * 0.5, 0.5)
@@ -219,7 +221,9 @@ def compute_som_directions(
     benign_mean = benign_states.mean(dim=0).to(torch.float32)  # (layers+1, hidden)
     benign_dir = F.normalize(benign_mean, p=2, dim=1)
 
-    out = torch.zeros(n_dirs, n_layers, hidden, dtype=torch.float32)
+    out = torch.zeros(
+        n_dirs, n_layers, hidden, dtype=torch.float32, device=target_states.device
+    )
     for layer_idx in range(n_layers):
         target_layer = target_states[:, layer_idx, :].to(torch.float32)
         # Skip degenerate layers (e.g. all-zero rows) — fall back to mean-diff.
