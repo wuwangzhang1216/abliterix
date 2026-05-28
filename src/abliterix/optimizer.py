@@ -488,6 +488,17 @@ def run_search(
     if start_index > 0:
         print()
         print("Resuming existing study.")
+    elif opt.seed_trials:
+        # Enqueue user-supplied known-good points before TPE sampling. Each
+        # seed dict skips suggest_* sampling for any param it specifies; TPE
+        # still samples params absent from the dict. Only fires on a fresh
+        # study — resumed studies (start_index > 0) keep their existing trial
+        # history without re-enqueueing.
+        print()
+        print(f"Enqueueing {len(opt.seed_trials)} seed trial(s) before TPE search.")
+        for i, seed in enumerate(opt.seed_trials):
+            study.enqueue_trial(seed, skip_if_exists=True)
+            print(f"  seed {i}: {len(seed)} params pinned")
 
     try:
         study.optimize(

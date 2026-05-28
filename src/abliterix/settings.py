@@ -997,6 +997,21 @@ class OptimizationConfig(BaseModel):
         description="Fixed seed for the Optuna sampler and PyTorch RNG.",
     )
 
+    seed_trials: list[dict] = Field(
+        default_factory=list,
+        description=(
+            "Optional list of known-good parameter dicts to enqueue as the "
+            "first trials of the Optuna study, before any TPE sampling. Each "
+            "dict maps Optuna parameter names (e.g. 'vector_index', "
+            "'attn.o_proj.max_weight', '{component}.min_weight' — note the "
+            "latter is a FRACTION of max_weight, not absolute) to seed values. "
+            "Use this to bootstrap TPE near published SOTA recipes so warmup "
+            "trials refine around a known good point instead of random "
+            "sampling. Resumed studies (load_if_exists=True) skip enqueueing "
+            "if any seed key is already in study.trials."
+        ),
+    )
+
 
 class KLConfig(BaseModel):
     """Kullback-Leibler divergence measurement settings."""
