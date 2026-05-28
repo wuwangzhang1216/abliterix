@@ -137,22 +137,43 @@ def apply_orba_transform(
 ) -> Tensor:
     """ORBA: double-GS orthogonalisation + rank-1 ablation + optional row-norm preserve.
 
-    ``W_new = W + α · (W · û) ⊗ û`` with ``α = -strength`` and ``û`` the
-    double-Gram-Schmidt-orthogonalised, unit-normalised refusal direction.
+    For modules that write to the residual stream (e.g. attn.o_proj,
+    mlp.down_proj) the canonical abliteration removes the refusal direction
+    from the OUTPUT side:
+
+        W_new = W - strength · û ⊗ (û · W)        # output-side
+
+    For modules that read from the residual stream (e.g. attn.q/k/v_proj —
+    rarely the abliteration target on its own) the input-side variant is:
+
+        W_new = W - strength · (W · û) ⊗ û        # input-side
+
+    When the refusal direction matches both dims (square matrix such as a
+    standard-attention o_proj), prefer the OUTPUT-side variant so the kernel
+    matches what the LoRA path and ``apply_standard_transform`` produce —
+    the historical input-side-only behaviour was a bug that produced very
+    different deltas on square matrices vs. the LoRA / standard paths,
+    visible as a ~8x weaker ablation on Granite 4.1 8B's o_proj layers.
 
     If ``preserve_row_norm`` is True, every output row is rescaled to its
     original Frobenius norm in a post-step (grimjim's default).
     """
     u_hat = double_gram_schmidt(refusal, benign_dir)
     W32 = W.to(dtype=torch.float32)
+    out_f, in_f = W32.shape
 
-    if W32.shape[1] != u_hat.shape[0]:
+    if u_hat.shape[0] == out_f:
+        # Output-side: prefered when v lives in the residual / output space.
+        new_W = W32 - strength * u_hat.unsqueeze(1) * (u_hat @ W32).unsqueeze(0)
+    elif u_hat.shape[0] == in_f:
+        # Input-side fallback for asymmetric matrices where v only matches
+        # the input dim (rare for abliteration target modules).
+        new_W = W32 - strength * (W32 @ u_hat).unsqueeze(1) * u_hat.unsqueeze(0)
+    else:
         raise ValueError(
-            f"ORBA expects input-side direction; W shape {W32.shape}, "
-            f"direction shape {u_hat.shape}."
+            f"ORBA direction shape {u_hat.shape} does not match either axis "
+            f"of W shape {W32.shape}."
         )
-
-    new_W = W32 - strength * (W32 @ u_hat).unsqueeze(1) * u_hat.unsqueeze(0)
 
     if preserve_row_norm:
         original_norms = torch.linalg.vector_norm(W32, dim=1, keepdim=True)
@@ -170,41 +191,60 @@ def apply_biprojected_transform(
 ) -> Tensor:
     """Norm-Preserving Biprojected Abliteration (grimjim).
 
-    Decomposes ``W = M · Ŵ`` (row magnitudes × per-row unit directions),
-    ablates the refusal direction on the unit directions only:
+    Picks input-side or output-side decomposition based on which axis of W
+    the refusal direction matches; prefers output-side when both match
+    (square modules) so the semantics line up with LoRA / standard / ORBA.
 
-        Ŵ_ablated = Ŵ − strength · û ⊗ (û · Ŵᵀ)
-        Ŵ_new     = normalize_rows(Ŵ_ablated)
-        W_new     = M · Ŵ_new
+    Output-side (``refusal.shape[0] == W.shape[0]``): column-magnitude
+    decomposition ``W = Ŵ · diag(N)`` where Nⱼ is the L2 norm of column j
+    and Ŵ has unit-norm columns. Ablate refusal from the unit columns,
+    re-normalise, recombine. Preserves each column's L2 norm exactly.
 
-    The row L2 norm is exactly preserved (== ``M``), unlike the standard
-    path which only approximately preserves it through a post-step rescale.
+        p     = û · Ŵ                              # (in,)
+        Ŵ_abl = Ŵ − strength · û ⊗ p
+        Ŵ_new = normalize_cols(Ŵ_abl)
+        W_new = Ŵ_new · diag(N)
 
-    ``refusal`` must be a (in,) vector matching ``W.shape[1]``.
+    Input-side (``refusal.shape[0] == W.shape[1]``): the original row-mag
+    decomposition.
+
+        p     = Ŵ · d                              # (out,)
+        Ŵ_abl = Ŵ − strength · p ⊗ d
+        Ŵ_new = normalize_rows(Ŵ_abl)
+        W_new = diag(M) · Ŵ_new
     """
     d = _normalise(refusal.to(dtype=torch.float32))
     W32 = W.to(dtype=torch.float32)
-    if W32.shape[1] != d.shape[0]:
+    out_f, in_f = W32.shape
+
+    if d.shape[0] == out_f:
+        # Output-side: column-wise decomposition.
+        N = torch.linalg.vector_norm(W32, dim=0, keepdim=True).clamp(min=1e-8)
+        W_hat = W32 / N  # (out, in), per-column unit
+        p = d @ W_hat  # (in,)
+        W_hat_ablated = W_hat - strength * d.unsqueeze(1) * p.unsqueeze(0)
+        new_norms = torch.linalg.vector_norm(W_hat_ablated, dim=0, keepdim=True).clamp(
+            min=1e-8
+        )
+        W_hat_new = W_hat_ablated / new_norms
+        W_new = W_hat_new * N
+    elif d.shape[0] == in_f:
+        # Input-side: row-wise decomposition (original behaviour).
+        M = torch.linalg.vector_norm(W32, dim=1, keepdim=True).clamp(min=1e-8)
+        W_hat = W32 / M  # (out, in), per-row unit
+        p = W_hat @ d  # (out,)
+        W_hat_ablated = W_hat - strength * p.unsqueeze(1) * d.unsqueeze(0)
+        new_norms = torch.linalg.vector_norm(W_hat_ablated, dim=1, keepdim=True).clamp(
+            min=1e-8
+        )
+        W_hat_new = W_hat_ablated / new_norms
+        W_new = M * W_hat_new
+    else:
         raise ValueError(
-            "Biprojected expects input-side direction; "
-            f"W shape {W32.shape}, refusal shape {d.shape}."
+            f"Biprojected direction shape {d.shape} does not match either "
+            f"axis of W shape {W32.shape}."
         )
 
-    # Row-wise decomposition.
-    M = torch.linalg.vector_norm(W32, dim=1, keepdim=True).clamp(min=1e-8)
-    W_hat = W32 / M  # (out, in), per-row unit
-
-    # Projection coefficient per output row: p_i = d · Ŵ_i.
-    p = W_hat @ d  # (out,)
-    # Rank-1 ablation on Ŵ.
-    W_hat_ablated = W_hat - strength * p.unsqueeze(1) * d.unsqueeze(0)
-    # Re-normalise rows to unit length.
-    new_norms = torch.linalg.vector_norm(W_hat_ablated, dim=1, keepdim=True).clamp(
-        min=1e-8
-    )
-    W_hat_new = W_hat_ablated / new_norms
-    # Recombine with original magnitudes.
-    W_new = M * W_hat_new
     return W_new.to(W.dtype)
 
 
@@ -215,24 +255,43 @@ def apply_householder_transform(
     *,
     strength: float = 1.0,
 ) -> Tensor:
-    """Exact isometric reflection: ``W ← W − 2 (W · û) ⊗ û``.
+    """Exact isometric reflection along the (orthogonalised) refusal direction.
 
-    With ``strength = 1.0`` this is the canonical Householder reflector
-    ``H = I − 2 ûûᵀ`` applied from the right of W (i.e. an isometry on the
-    input space). With ``strength < 1.0`` the reflection is interpolated
-    toward the identity, useful for partial ablation. Norm-preserving by
-    construction when ``strength = 1.0``; grimjim observed token-level
-    glitches at full strength on some checkpoints — keep it as an opt-in
-    knob, not the default.
+    Two variants depending on which axis of W the direction matches:
+
+    Output-side (preferred for residual-stream-write modules where v matches
+    ``W.shape[0]``):
+
+        H = I − 2 û ûᵀ                      (acts on output space)
+        W_new = (I − 2 û ûᵀ) W = W − 2 û (û · W)
+
+    Input-side (when v only matches ``W.shape[1]``):
+
+        H = I − 2 û ûᵀ                      (acts on input space)
+        W_new = W (I − 2 û ûᵀ) = W − 2 (W û) ûᵀ
+
+    With ``strength = 1.0`` either is an isometry (norm-preserving by
+    construction). With ``strength < 1.0`` the reflection is interpolated
+    toward the identity, useful for partial ablation. grimjim observed
+    token-level glitches at full strength on some checkpoints — keep it as
+    an opt-in knob, not the default.
+
+    Prefer output-side when v matches both axes (square modules) to match
+    the LoRA / standard / ORBA semantics.
     """
     u_hat = double_gram_schmidt(refusal, benign_dir)
     W32 = W.to(dtype=torch.float32)
-    if W32.shape[1] != u_hat.shape[0]:
+    out_f, in_f = W32.shape
+
+    if u_hat.shape[0] == out_f:
+        new_W = W32 - 2.0 * strength * u_hat.unsqueeze(1) * (u_hat @ W32).unsqueeze(0)
+    elif u_hat.shape[0] == in_f:
+        new_W = W32 - 2.0 * strength * (W32 @ u_hat).unsqueeze(1) * u_hat.unsqueeze(0)
+    else:
         raise ValueError(
-            f"Householder expects input-side direction; W shape {W32.shape}, "
-            f"direction shape {u_hat.shape}."
+            f"Householder direction shape {u_hat.shape} does not match "
+            f"either axis of W shape {W32.shape}."
         )
-    new_W = W32 - 2.0 * strength * (W32 @ u_hat).unsqueeze(1) * u_hat.unsqueeze(0)
     return new_W.to(W.dtype)
 
 

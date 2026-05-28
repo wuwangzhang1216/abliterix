@@ -631,16 +631,22 @@ def _apply_direct_steering(
                         v = global_vector.to(device)
                     vf = v.to(torch.float32)
 
-                    # Advanced grimjim transforms (ORBA / biprojected / Householder)
-                    # only handle input-side ablation. Use them when the
-                    # direction matches in_f; otherwise fall back to the
-                    # standard math below.
-                    if (
-                        direct_transform != DirectTransform.STANDARD
-                        and vf.shape[0] == in_f
+                    # Advanced grimjim transforms (ORBA / biprojected /
+                    # Householder) accept either input-side or output-side
+                    # directions — apply_orba_transform picks the right
+                    # branch internally (prefers output-side for square
+                    # matrices). Trigger whenever v matches either dim of W
+                    # so square modules like attn.o_proj don't silently
+                    # fall through to standard, losing ORBA's row-norm
+                    # preservation post-step.
+                    if direct_transform != DirectTransform.STANDARD and (
+                        vf.shape[0] == in_f or vf.shape[0] == out_f
                     ):
                         bdir: Tensor | None = None
-                        if benign_dirs is not None and benign_dirs.shape[1] == in_f:
+                        if (
+                            benign_dirs is not None
+                            and benign_dirs.shape[1] == vf.shape[0]
+                        ):
                             bdir = benign_dirs[layer_idx + 1].to(device)
                         # Householder / ORBA require benign_dir; if we don't
                         # have one (benign_states wasn't kept past the
