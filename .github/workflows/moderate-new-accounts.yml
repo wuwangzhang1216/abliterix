@@ -1,0 +1,116 @@
+name: Moderate new accounts
+
+# Restricts issue/discussion activity from accounts younger than MIN_AGE_DAYS
+# (default 90 days ≈ 3 months). The built-in "interaction limit" only blocks
+# accounts < 24h old, so we check account age ourselves. Actions are recoverable:
+# comments are hidden (not deleted), issues are closed (not deleted) and labelled.
+# Tune the threshold without editing this file via a repo variable:
+#   gh variable set MIN_AGE_DAYS --repo <owner>/<repo> --body 90
+
+on:
+  issues:
+    types: [opened]
+  issue_comment:
+    types: [created]
+  discussion:
+    types: [created]
+  discussion_comment:
+    types: [created]
+
+permissions:
+  issues: write
+  discussions: write
+  contents: read
+
+jobs:
+  moderate:
+    runs-on: ubuntu-latest
+    # Skip runs triggered by our own bot comment (avoids a no-op re-run).
+    if: ${{ !endsWith(github.actor, '[bot]') }}
+    steps:
+      - uses: actions/github-script@v7
+        env:
+          MIN_AGE_DAYS: ${{ vars.MIN_AGE_DAYS || 90 }}
+        with:
+          script: |
+            const MIN_AGE_DAYS = Number(process.env.MIN_AGE_DAYS) || 90;
+            const { eventName, payload } = context;
+
+            // Resolve the actor + target for each supported event.
+            let actor, association, commentNodeId;
+            if (eventName === 'issues') {
+              actor = payload.issue.user;
+              association = payload.issue.author_association;
+            } else if (eventName === 'discussion') {
+              actor = payload.discussion.user;
+              association = payload.discussion.author_association;
+            } else if (eventName === 'issue_comment' || eventName === 'discussion_comment') {
+              actor = payload.comment.user;
+              association = payload.comment.author_association;
+              commentNodeId = payload.comment.node_id;
+            } else {
+              core.info(`Unhandled event: ${eventName}`);
+              return;
+            }
+
+            const login = actor && actor.login;
+            if (!login) { core.info('No actor login; skipping.'); return; }
+
+            // Never moderate bots.
+            if (actor.type === 'Bot' || login.endsWith('[bot]')) {
+              core.info(`Skipping bot ${login}.`);
+              return;
+            }
+
+            // Never moderate the owner, org members, collaborators, or prior contributors.
+            const TRUSTED = ['OWNER', 'MEMBER', 'COLLABORATOR', 'CONTRIBUTOR'];
+            if (TRUSTED.includes(association)) {
+              core.info(`Skipping trusted ${login} (${association}).`);
+              return;
+            }
+
+            // Account age is public — no special scope needed.
+            const { data: user } = await github.rest.users.getByUsername({ username: login });
+            const ageDays = (Date.now() - new Date(user.created_at).getTime()) / 86400000;
+            core.info(`${login}: account age ${ageDays.toFixed(1)}d (threshold ${MIN_AGE_DAYS}d).`);
+            if (ageDays >= MIN_AGE_DAYS) {
+              core.info('Old enough — allowing.');
+              return;
+            }
+
+            core.warning(`New account ${login} (${ageDays.toFixed(1)}d) — moderating ${eventName}.`);
+
+            const minimizeAsSpam = (id) => github.graphql(
+              `mutation($id: ID!) {
+                 minimizeComment(input: { subjectId: $id, classifier: SPAM }) {
+                   minimizedComment { isMinimized }
+                 }
+               }`, { id });
+
+            const notice =
+              `👋 @${login} — automated moderation: to reduce spam, this repository holds ` +
+              `activity from accounts younger than ${MIN_AGE_DAYS} days. A maintainer will ` +
+              `review this shortly. Apologies if you're a genuine new contributor.`;
+
+            try {
+              if (eventName === 'issues') {
+                const issue_number = payload.issue.number;
+                await github.rest.issues.createComment({ ...context.repo, issue_number, body: notice });
+                // Best-effort label — don't let a labelling hiccup block the close.
+                try {
+                  await github.rest.issues.addLabels({ ...context.repo, issue_number, labels: ['new-account-hold'] });
+                } catch (e) { core.warning(`Label failed: ${e.message}`); }
+                await github.rest.issues.update({ ...context.repo, issue_number, state: 'closed', state_reason: 'not_planned' });
+              } else if (eventName === 'issue_comment' || eventName === 'discussion_comment') {
+                await minimizeAsSpam(commentNodeId);
+              } else if (eventName === 'discussion') {
+                await github.graphql(
+                  `mutation($id: ID!) {
+                     closeDiscussion(input: { discussionId: $id, reason: OUTDATED }) {
+                       discussion { id }
+                     }
+                   }`, { id: payload.discussion.node_id });
+              }
+            } catch (e) {
+              core.setFailed(`Moderation action failed: ${e.message}`);
+            }
