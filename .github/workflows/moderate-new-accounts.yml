@@ -28,7 +28,7 @@ jobs:
     # Skip runs triggered by our own bot comment (avoids a no-op re-run).
     if: ${{ !endsWith(github.actor, '[bot]') }}
     steps:
-      - uses: actions/github-script@v7
+      - uses: actions/github-script@v9
         env:
           MIN_AGE_DAYS: ${{ vars.MIN_AGE_DAYS || 90 }}
         with:
