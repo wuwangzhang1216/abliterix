@@ -22,6 +22,7 @@ from peft.tuners.lora.layer import Linear
 from torch import Tensor
 
 from ..settings import AbliterixConfig
+from ..util import resolve_seed
 from ..types import (
     DecayKernel,
     DirectTransform,
@@ -369,6 +370,13 @@ def apply_steering(
             else:  # LINEAR
                 strength = sp.max_weight + t * (sp.min_weight - sp.max_weight)
 
+            # A strength of exactly 0 means this component is disabled for this
+            # layer (e.g. the optimiser sampled max_weight = 0 via
+            # auto_disable_components).  The adapter is already at identity after
+            # restore_baseline(), so skip the wasteful dequant + decomposition.
+            if strength == 0:
+                continue
+
             for mod in modules:
                 # TODO: The module-interface assumption here is fragile — PEFT
                 #       wraps modules differently per quantisation mode.
@@ -479,6 +487,11 @@ def apply_steering(
                     W = W * W_row_norms
                     W = W - W_orig
                     r = engine.peft_config.r
+                    # svd_lowrank is randomised. Reseed immediately before the
+                    # call so a restored/re-evaluated trial reproduces the same
+                    # adapter independent of RNG history (otherwise FULL-mode
+                    # trials desync the Optuna Pareto front on restore).
+                    torch.manual_seed(resolve_seed(config))
                     U, S, Vh = torch.svd_lowrank(W, q=2 * r + 4, niter=6)
                     U = U[:, :r]
                     S = S[:r]
@@ -583,6 +596,12 @@ def _apply_direct_steering(
                 )
             else:  # LINEAR
                 strength = sp.max_weight + t * (sp.min_weight - sp.max_weight)
+
+            # Exactly-0 strength means this component is disabled for this layer
+            # (e.g. max_weight clamped to 0 via auto_disable_components). The
+            # base weights are untouched, so skip the edit entirely.
+            if strength == 0:
+                continue
 
             for mod in modules:
                 # Navigate to the base weight — through PEFT wrapper if present.
@@ -756,6 +775,10 @@ def _apply_ega_steering(
         else:
             strength = sp.max_weight + t * (sp.min_weight - sp.max_weight)
 
+        # Exactly-0 strength disables EGA for this layer (auto_disable_components).
+        if strength == 0:
+            continue
+
         # Pick the steering vector for this layer.
         device = fused.device
         if global_vector is None:
@@ -845,19 +868,25 @@ def _interpolate_strength(
 ) -> float | None:
     """Replicate the decay-kernel interpolation used by the HF paths.
 
-    Returns ``None`` when the layer falls outside ``[max_pos ± min_dist]``.
+    Returns ``None`` when the layer falls outside ``[max_pos ± min_dist]`` or
+    when the interpolated strength is exactly 0 (component disabled for this
+    layer via ``auto_disable_components``), so vLLM callers skip it uniformly.
     """
     distance = cast(float, abs(layer_idx - sp.max_weight_position))
     if distance > sp.min_weight_distance:
         return None
     t = distance / sp.min_weight_distance
     if kernel == DecayKernel.GAUSSIAN:
-        return sp.min_weight + (sp.max_weight - sp.min_weight) * math.exp(-2.0 * t * t)
-    if kernel == DecayKernel.COSINE:
-        return sp.min_weight + (sp.max_weight - sp.min_weight) * (
+        strength = sp.min_weight + (sp.max_weight - sp.min_weight) * math.exp(
+            -2.0 * t * t
+        )
+    elif kernel == DecayKernel.COSINE:
+        strength = sp.min_weight + (sp.max_weight - sp.min_weight) * (
             0.5 * (1.0 + math.cos(math.pi * t))
         )
-    return sp.max_weight + t * (sp.min_weight - sp.max_weight)
+    else:
+        strength = sp.max_weight + t * (sp.min_weight - sp.max_weight)
+    return None if strength == 0 else strength
 
 
 _ATTN_COMPONENTS: tuple[str, ...] = ("q_proj", "k_proj", "v_proj", "o_proj")

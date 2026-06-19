@@ -25,7 +25,13 @@ from optuna.trial import TrialState
 from .core.steering import apply_steering
 from .data import format_trial_params
 from .settings import AbliterixConfig
-from .types import DirectTransform, ExpertRoutingConfig, SteeringMode, SteeringProfile
+from .types import (
+    DecayKernel,
+    DirectTransform,
+    ExpertRoutingConfig,
+    SteeringMode,
+    SteeringProfile,
+)
 from .util import humanize_duration, print, report_memory
 
 
@@ -124,6 +130,18 @@ def run_search(
             trial_direct_transform = DirectTransform(chosen)
             trial.set_user_attr("direct_transform", chosen)
 
+        # --- Decay-kernel choice (categorical) ---
+        # Mutates config.steering.decay_kernel for this trial only; the
+        # `finally` block restores it. Lets TPE pick the layer-taper shape.
+        trial_decay_kernel: DecayKernel | None = None
+        if config.steering.search_decay_kernel:
+            chosen_kernel = trial.suggest_categorical(
+                "decay_kernel",
+                config.steering.search_decay_kernel_choices,
+            )
+            trial_decay_kernel = DecayKernel(chosen_kernel)
+            trial.set_user_attr("decay_kernel", chosen_kernel)
+
         # --- Steering-vector variant (single vs harmfulness pair) ---
         if _variants is not None:
             variant_keys = list(_variants.keys())
@@ -163,11 +181,27 @@ def run_search(
             comp_range = config.steering.component_strength_ranges.get(
                 component, config.steering.strength_range
             )
-            max_w = trial.suggest_float(
-                f"{component}.max_weight",
-                comp_range[0],
-                comp_range[1],
+            lo, hi = comp_range[0], comp_range[1]
+            # Auto-disable: for components the user marks (default
+            # ``mlp.down_proj``) drop the lower bound below 0 and clamp the
+            # sample to max(0.0, …).  A continuous sampler hits an exact point
+            # with probability zero, so the negative-and-clamp trick is what
+            # gives TPE a finite chance of *fully disabling* the component this
+            # trial — letting it discover per-model that e.g. ablating the MLP
+            # down-projection hurts more than it helps, with no manual
+            # ``disabled_components`` decision required.
+            auto_disable = (
+                component in config.steering.auto_disable_components
+                and config.steering.auto_disable_floor < 0
             )
+            if auto_disable:
+                lo = config.steering.auto_disable_floor
+            sampled_max_w = trial.suggest_float(
+                f"{component}.max_weight",
+                lo,
+                hi,
+            )
+            max_w = max(0.0, sampled_max_w) if auto_disable else sampled_max_w
             pos_lo = 0.4 * last_layer if last_layer < 20 else 0.6 * last_layer
             peak_pos = trial.suggest_float(
                 f"{component}.max_weight_position",
@@ -259,6 +293,15 @@ def run_search(
                     f"* trial direct_transform = "
                     f"[bold]{trial_direct_transform.value}[/]"
                 )
+
+        # Swap the sampled decay kernel into the global config for this trial.
+        # Restored in the `finally` block below.
+        _saved_decay_kernel: DecayKernel | None = None
+        if trial_decay_kernel is not None:
+            _saved_decay_kernel = config.steering.decay_kernel
+            config.steering.decay_kernel = trial_decay_kernel
+            if trial_counter == 1:
+                print(f"* trial decay_kernel = [bold]{trial_decay_kernel.value}[/]")
 
         # In-place editing path: direct weight edits on TP workers via
         # collective_rpc. Takes precedence over the LoRA adapter path when
@@ -425,6 +468,9 @@ def run_search(
             # Restore the global direct_transform if this trial sampled one.
             if _saved_direct_transform is not None:
                 config.steering.direct_transform = _saved_direct_transform
+            # Restore the global decay_kernel if this trial sampled one.
+            if _saved_decay_kernel is not None:
+                config.steering.decay_kernel = _saved_decay_kernel
 
         # Timing / resource report
         elapsed = time.perf_counter() - start_time
@@ -459,16 +505,20 @@ def run_search(
     # Study creation / resumption
     # ----------------------------------------------------------------
 
-    if opt.sampler_seed is not None:
-        torch.manual_seed(opt.sampler_seed)
+    # Prefer the explicit sampler_seed; otherwise fall back to the global
+    # ``config.seed`` so a single top-level seed makes the whole run (sampler
+    # included) reproducible.
+    _sampler_seed = opt.sampler_seed if opt.sampler_seed is not None else config.seed
+    if _sampler_seed is not None:
+        torch.manual_seed(_sampler_seed)
 
     sampler_kw: dict = dict(
         n_startup_trials=opt.num_warmup_trials,
         n_ei_candidates=128,
         multivariate=True,
     )
-    if opt.sampler_seed is not None:
-        sampler_kw["seed"] = opt.sampler_seed
+    if _sampler_seed is not None:
+        sampler_kw["seed"] = _sampler_seed
 
     study = optuna.create_study(
         sampler=TPESampler(**sampler_kw),

@@ -33,6 +33,11 @@ def _finite_logprobs(logprobs: Tensor) -> Tensor:
 
 def _safe_kl_divergence(current_logprobs: Tensor, baseline_logprobs: Tensor) -> float:
     """Compute finite KL even when a damaged trial emits NaN/Inf logits."""
+    # Align devices: with inference.offload_outputs_to_cpu the two operands may
+    # originate on different devices (e.g. baseline on GPU, current offloaded to
+    # CPU). Move the baseline onto the current tensor's device before kl_div.
+    if baseline_logprobs.device != current_logprobs.device:
+        baseline_logprobs = baseline_logprobs.to(current_logprobs.device)
     kl = F.kl_div(
         _finite_logprobs(current_logprobs),
         _finite_logprobs(baseline_logprobs),
@@ -317,14 +322,25 @@ class TrialScorer:
 
         compliance_objective = detected_refusals / self.baseline_refusal_count
 
-        # Always treat KL as an independent objective. The previous design
-        # tied the divergence objective to compliance when KL fell below
-        # ``target``, which collapses the 2-D Pareto frontier into a single
-        # axis whenever steering is conservative (KL < target), causing the
-        # TPE sampler to explore blindly once the first low-refusal trial is
-        # found. Using KL directly keeps the two objectives independent so
-        # the optimizer can learn a real KL-vs-refusals tradeoff curve.
-        divergence_objective = kl_divergence / scale
+        # Default ("independent"): treat KL as an independent objective. Tying
+        # the divergence objective to compliance below ``target`` collapses the
+        # 2-D Pareto frontier into a single axis whenever steering is
+        # conservative (KL < target), causing the TPE sampler to explore blindly
+        # once the first low-refusal trial is found. Using KL directly keeps the
+        # two objectives independent so the optimizer can learn a real
+        # KL-vs-refusals tradeoff curve. (The 2-D front + kl.prune_threshold
+        # early-stop already dominate true no-op trials on the compliance axis.)
+        #
+        # Opt-in ("do_nothing_guard"): replicate Heretic's anti-"do-nothing"
+        # trick — while KL < target, drive the divergence objective from the
+        # compliance score so the sampler is pushed out of conservative regions.
+        if (
+            self.config.kl.objective_mode == "do_nothing_guard"
+            and kl_divergence < self.config.kl.target
+        ):
+            divergence_objective = compliance_objective * self.config.kl.target / scale
+        else:
+            divergence_objective = kl_divergence / scale
 
         # Penalise degenerate output lengths beyond 2 standard deviations.
         # KL on early generated tokens cannot see long-form drift (model

@@ -189,3 +189,42 @@ def flush_memory():
 def slugify_model_name(model_name: str) -> str:
     """Turn a model identifier into a filesystem-safe slug."""
     return "".join(c if (c.isalnum() or c in ["_", "-"]) else "--" for c in model_name)
+
+
+# ---------------------------------------------------------------------------
+# Determinism / seeding
+# ---------------------------------------------------------------------------
+
+# Fallback seed used when neither config.seed nor optimization.sampler_seed is
+# set.  Steering paths that need a deterministic RNG state (e.g. the FULL
+# weight-normalisation low-rank SVD) reseed to ``resolve_seed(config)`` so a
+# restored trial reproduces the same adapter regardless of RNG history.
+_DEFAULT_SEED = 0
+
+
+def resolve_seed(config) -> int:
+    """Return the effective global seed for *config*.
+
+    Prefers the explicit top-level ``seed``, then ``optimization.sampler_seed``,
+    then a fixed fallback so callers always get a concrete int.
+    """
+    seed = getattr(config, "seed", None)
+    if seed is None:
+        seed = getattr(getattr(config, "optimization", None), "sampler_seed", None)
+    return int(seed) if seed is not None else _DEFAULT_SEED
+
+
+def set_seed(seed: int) -> None:
+    """Seed ``random``, ``numpy`` (if installed) and ``torch`` for reproducibility."""
+    import random
+
+    random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+    try:
+        import numpy as np  # ty:ignore[unresolved-import]
+
+        np.random.seed(seed % (2**32))
+    except ImportError:
+        pass

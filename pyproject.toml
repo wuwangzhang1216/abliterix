@@ -50,6 +50,12 @@ ui = [
     "gradio~=5.20",
     "plotly~=6.1",
 ]
+bench = [
+    # Standard capability/instruction benchmarks (MMLU, GSM8K, HellaSwag,
+    # IFEval, …) for the post-run "Run standard benchmarks" menu action and
+    # original-vs-abliterated comparison table.
+    "lm-eval>=0.4.5",
+]
 vllm = [
     # Floor pinned to >=0.18 because abliterix's MoE/expert editors require
     # `VLLM_ALLOW_INSECURE_SERIALIZATION` (PR #35928, v0.18.0) for
@@ -84,6 +90,15 @@ abliterix-dequant-fp8 = "abliterix.scripts.dequant_fp8:main"
 [build-system]
 requires = ["uv_build>=0.8.11,<0.9.0"]
 build-backend = "uv_build"
+
+[tool.uv]
+# Pin dependency resolution to a fixed point in time so `uv lock` regeneration
+# (and fresh `uv sync` without the committed lock) cannot silently pull a
+# newly-released transitive dep that breaks the GPU path — the exact class of
+# failure tracked in the deploy-lessons memory (transformers/flashinfer/vLLM
+# version skew). A fixed date is preferred over a sliding window so the cutoff
+# is reproducible. Bump deliberately alongside a green CI run.
+exclude-newer = "2026-06-19T00:00:00Z"
 
 [tool.uv.build-backend]
 module-name = "abliterix"

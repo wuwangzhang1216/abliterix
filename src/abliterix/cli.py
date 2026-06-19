@@ -8,6 +8,7 @@
 
 import math
 import os
+import random
 import sys
 import time
 import warnings
@@ -46,6 +47,7 @@ from .util import (
     flush_memory,
     print,
     report_memory,
+    set_seed,
     slugify_model_name,
 )
 from .types import SteeringMode
@@ -68,6 +70,76 @@ def _print_banner():
     print()
 
 
+def _load_reproduce_config(repro_path: str) -> "AbliterixConfig | None":
+    """Load a reproduce.json manifest, report the environment diff, and rebuild config.
+
+    Returns the reconstructed config, or None if the manifest is unusable.
+    """
+    from .reproducibility import check_environment, load_manifest
+
+    try:
+        manifest = load_manifest(repro_path)
+    except (OSError, ValueError) as error:
+        print(
+            f"[red]Could not read reproduce manifest [bold]{repro_path}[/]: {error}[/]"
+        )
+        return None
+
+    print(
+        f"Reproducing from [bold]{repro_path}[/] "
+        f"(abliterix v{manifest.get('abliterix_version')})"
+    )
+
+    findings = check_environment(manifest)
+    if findings:
+        print("Environment differences from the recorded run:")
+        _colors = {
+            "CRITICAL": "red bold",
+            "HIGH": "red",
+            "MEDIUM": "yellow",
+            "LOW": "grey50",
+        }
+        for sev, msg in findings:
+            print(f"  [{_colors.get(sev, 'white')}]\\[{sev}][/] {msg}")
+        if any(sev in ("CRITICAL", "HIGH") for sev, _ in findings):
+            print(
+                "[yellow]High-severity differences may change the produced "
+                "weights; exact bit-reproduction is not guaranteed.[/]"
+            )
+    else:
+        print("[green]Environment matches the recorded run.[/]")
+
+    stored = manifest.get("config")
+    if not isinstance(stored, dict):
+        print("[red]Manifest has no usable 'config' block; cannot reproduce.[/]")
+        return None
+    try:
+        return AbliterixConfig.model_validate(stored)
+    except ValidationError as error:
+        print(f"[red]Recorded config failed validation: {error}[/]")
+        return None
+
+
+def _query_gpu_driver() -> str | None:
+    """Best-effort NVIDIA driver version via nvidia-smi (None if unavailable)."""
+    import subprocess
+
+    try:
+        out = subprocess.run(
+            ["nvidia-smi", "--query-gpu=driver_version", "--format=csv,noheader"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if out.returncode == 0:
+            lines = out.stdout.strip().splitlines()
+            if lines:
+                return lines[0].strip()
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return None
+
+
 def _detect_devices():
     if torch.cuda.is_available():
         count = torch.cuda.device_count()
@@ -75,6 +147,15 @@ def _detect_devices():
         print(
             f"Detected [bold]{count}[/] CUDA device(s) ({total / (1024**3):.2f} GB total VRAM):"
         )
+        # Report the runtime + driver so the common RunPod driver→CUDA→wheel
+        # mismatch (PTX / Marlin-FP4 JIT failures) is visible at a glance and
+        # easy to include in bug reports.
+        is_hip = getattr(torch.version, "hip", None)
+        api = "HIP" if is_hip else "CUDA"
+        api_ver = (torch.version.hip if is_hip else torch.version.cuda) or "unknown"
+        driver = None if is_hip else _query_gpu_driver()
+        driver_str = f", driver [bold]{driver}[/]" if driver else ""
+        print(f"* {api} runtime [bold]{api_ver}[/]{driver_str}")
         for i in range(count):
             vram = torch.cuda.mem_get_info(i)[1] / (1024**3)
             print(
@@ -409,37 +490,68 @@ def run():
 
     _print_banner()
 
-    # CLI shorthands: map --model X to --model.model-id X so that users
-    # do not need to type the full nested path for the most common flags.
-    _cli_aliases = {"--model": "--model.model-id"}
-    for short, full in _cli_aliases.items():
-        for i, arg in enumerate(sys.argv):
-            if arg == short:
-                sys.argv[i] = full
+    # Reproduce mode: rebuild the config from a published reproduce.json and
+    # verify the current environment before re-running. Extracted before the
+    # --model shorthand handling so a model id is not required.
+    repro_path: str | None = None
+    if "--reproduce" in sys.argv:
+        idx = sys.argv.index("--reproduce")
+        if idx + 1 >= len(sys.argv):
+            print("[red]--reproduce requires a path to a reproduce.json file.[/]")
+            return
+        repro_path = sys.argv[idx + 1]
+        del sys.argv[idx : idx + 2]
 
-    # Infer --model.model-id flag if the last argument looks like a model identifier.
-    if (
-        len(sys.argv) > 1
-        and "--model.model-id" not in sys.argv
-        and not sys.argv[-1].startswith("-")
-    ):
-        sys.argv.insert(-1, "--model.model-id")
+    if repro_path is None:
+        # CLI shorthands: map --model X to --model.model-id X so that users
+        # do not need to type the full nested path for the most common flags.
+        _cli_aliases = {"--model": "--model.model-id"}
+        for short, full in _cli_aliases.items():
+            for i, arg in enumerate(sys.argv):
+                if arg == short:
+                    sys.argv[i] = full
 
-    try:
-        config = AbliterixConfig()  # ty:ignore[missing-argument]
-    except ValidationError as error:
-        print(f"[red]Configuration contains [bold]{error.error_count()}[/] errors:[/]")
-        for err in error.errors():
-            print(f"[bold]{err['loc'][0]}[/]: [yellow]{err['msg']}[/]")
-        print()
-        print(
-            "Run [bold]abliterix --help[/] or see [bold]abliterix.toml[/] for details "
-            "about configuration parameters."
-        )
-        return
+        # Infer --model.model-id flag if the last argument looks like a model identifier.
+        if (
+            len(sys.argv) > 1
+            and "--model.model-id" not in sys.argv
+            and not sys.argv[-1].startswith("-")
+        ):
+            sys.argv.insert(-1, "--model.model-id")
+
+    if repro_path is not None:
+        config = _load_reproduce_config(repro_path)
+        if config is None:
+            return
+    else:
+        try:
+            config = AbliterixConfig()  # ty:ignore[missing-argument]
+        except ValidationError as error:
+            print(
+                f"[red]Configuration contains [bold]{error.error_count()}[/] errors:[/]"
+            )
+            for err in error.errors():
+                print(f"[bold]{err['loc'][0]}[/]: [yellow]{err['msg']}[/]")
+            print()
+            print(
+                "Run [bold]abliterix --help[/] or see [bold]abliterix.toml[/] for details "
+                "about configuration parameters."
+            )
+            return
 
     _detect_devices()
     _configure_libraries()
+
+    # Resolve + apply the global seed (random/numpy/torch) for reproducibility.
+    # When unset, draw one and print it so the run can be reproduced verbatim.
+    _seed_was_random = config.seed is None
+    if _seed_was_random:
+        config.seed = random.randint(0, 2**31 - 1)
+    set_seed(config.seed)
+    print(
+        f"Global seed: [bold]{config.seed}[/]"
+        + (" [grey50](randomly chosen)[/]" if _seed_was_random else "")
+    )
 
     os.makedirs(config.optimization.checkpoint_dir, exist_ok=True)
 

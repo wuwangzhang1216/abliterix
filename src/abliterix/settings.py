@@ -491,6 +491,26 @@ class InferenceConfig(BaseModel):
         ),
     )
 
+    offload_outputs_to_cpu: bool = Field(
+        default=True,
+        description=(
+            "Move per-batch analysis tensors (residuals, log-probabilities) to "
+            "host RAM as soon as each batch is computed, instead of accumulating "
+            "the full (n_prompts × layers × hidden) stack in VRAM before the "
+            "concatenation.  Lowers peak VRAM during steering-vector extraction "
+            "and KL baseline capture.  Trade-off: because the direction-extraction "
+            "math derives its device from the residual tensor, the one-time "
+            "analysis-phase linear algebra then runs on the CPU.  For the default "
+            "``vector_method = 'mean'`` this is negligible (just a mean over a few "
+            "hundred vectors per layer), but for the heavy methods (sra / pca / "
+            "som / ot / cosmic / sae, which do per-layer SVD / eigh / QR) it moves "
+            "that compute off the GPU; set this to ``false`` on a VRAM-rich host "
+            "running those methods to keep extraction on the GPU.  Only affects "
+            "the HuggingFace backend; the vLLM/SGLang paths manage their own "
+            "memory.  Mirrors Heretic's ``offload_outputs_to_cpu``."
+        ),
+    )
+
 
 class SteeringConfig(BaseModel):
     """Hyper-parameters for the steering (abliteration) algorithm."""
@@ -699,11 +719,42 @@ class SteeringConfig(BaseModel):
         ),
     )
 
+    auto_disable_components: list[str] = Field(
+        default_factory=lambda: ["mlp.down_proj"],
+        description=(
+            "Components for which the optimiser is allowed to fully disable "
+            "ablation (max_weight = 0) within a single trial.  For each listed "
+            "component the lower bound of the ``max_weight`` search is dropped to "
+            "``auto_disable_floor`` and the sampled value is clamped to "
+            "``max(0.0, …)``, which places a finite probability mass on exactly "
+            "0 (a continuous sampler reaches 0 with probability zero otherwise).  "
+            "This lets TPE *discover* per-model that a component is best left "
+            "untouched — ablating ``mlp.down_proj`` in particular tends to damage "
+            "intelligence more than it suppresses refusals.  Set to ``[]`` to "
+            "restore the previous behaviour where every searched component uses a "
+            "strictly-positive range.  Mirrors Heretic's clamped negative lower "
+            "bound for the MLP down-projection."
+        ),
+    )
+
+    auto_disable_floor: float = Field(
+        default=-0.25,
+        description=(
+            "Negative lower bound used for the ``max_weight`` search of every "
+            "component listed in ``auto_disable_components``.  The fraction of the "
+            "search interval below zero (``|floor| / (hi + |floor|)``) becomes the "
+            "probability mass assigned to a fully-disabled component.  Must be "
+            "≤ 0; a value of 0 disables the auto-disable behaviour."
+        ),
+    )
+
     outlier_quantile: float = Field(
         default=1.0,
         description=(
             "Symmetric winsorisation quantile applied to per-prompt residual vectors.  "
-            "Values below 1.0 clamp extreme activations."
+            "Values below 1.0 clamp extreme activations.  (Equivalent to Heretic's "
+            "``winsorization_quantile``; see also ``winsorize_vectors`` which "
+            "winsorises the final direction vector.)"
         ),
     )
 
@@ -927,6 +978,25 @@ class SteeringConfig(BaseModel):
         ),
     )
 
+    search_decay_kernel: bool = Field(
+        default=False,
+        description=(
+            "Sample the per-layer ``decay_kernel`` (linear / gaussian / cosine) "
+            "as a TPE categorical dimension instead of fixing it via the static "
+            "``decay_kernel`` setting.  When True the Pareto front exposes which "
+            "kernel shape best trades KL against refusals for the current model. "
+            "Opt-in; default off keeps ``decay_kernel`` as a fixed global value."
+        ),
+    )
+
+    search_decay_kernel_choices: list[str] = Field(
+        default_factory=lambda: ["linear", "gaussian", "cosine"],
+        description=(
+            "Restrict the categorical sample for ``search_decay_kernel`` to a "
+            "subset of the available kernel shapes."
+        ),
+    )
+
     search_harmfulness_direction: bool = Field(
         default=False,
         description=(
@@ -1048,9 +1118,29 @@ class KLConfig(BaseModel):
         description="Number of generated tokens over which KL divergence is averaged.",
     )
 
+    objective_mode: Literal["independent", "do_nothing_guard"] = Field(
+        default="independent",
+        description=(
+            "How the divergence objective is shaped.\n"
+            '"independent" (default): the divergence objective is the raw KL / '
+            "scale, kept fully independent of the compliance objective.  Combined "
+            "with the 2-D Pareto front and ``prune_threshold`` early-stopping, "
+            "no-op trials are naturally dominated on the compliance axis.\n"
+            '"do_nothing_guard": replicates Heretic\'s anti-"do-nothing" trick — '
+            "while KL < ``target`` the divergence objective is tied to the "
+            "compliance score (``compliance * target / scale``) so the sampler "
+            "is pushed out of conservative regions that barely perturb the model.  "
+            "Opt-in; can collapse the 2-D front into one axis when steering is "
+            "conservative."
+        ),
+    )
+
     target: float = Field(
         default=0.01,
-        description="KL threshold below which the refusal objective becomes dominant.",
+        description=(
+            "KL threshold below which the refusal objective becomes dominant.  "
+            'Only consulted when ``objective_mode = "do_nothing_guard"``.'
+        ),
     )
 
     prune_threshold: float = Field(
@@ -1550,6 +1640,20 @@ class AbliterixConfig(BaseSettings):
         description=(
             "In batch mode, discard an existing checkpoint and start from scratch.  "
             "Has no effect if non_interactive is False."
+        ),
+    )
+
+    seed: int | None = Field(
+        default=None,
+        description=(
+            "Global RNG seed applied to ``random``, ``numpy`` and ``torch`` at "
+            "startup, and recorded in the reproducibility manifest.  When left "
+            "unset a seed is drawn at random and printed, so any run can be "
+            "reproduced by re-supplying the value.  Also used to make the "
+            'weight_normalization="full" low-rank SVD bit-reproducible on trial '
+            "restore.  Distinct from ``optimization.sampler_seed`` (which seeds "
+            "only the Optuna TPE sampler); when ``sampler_seed`` is unset it "
+            "defaults to this value."
         ),
     )
 

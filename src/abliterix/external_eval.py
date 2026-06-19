@@ -17,9 +17,15 @@ single-call helpers:
 
 Each helper takes a *generator* callable plus the relevant dataset and
 emits a small result dataclass. The unit tests use stub generators so
-the harness logic is verifiable without GPU resources; in production
-``cli.py`` wires ``lambda msgs: engine.generate(msgs)`` (or the vLLM/
-SGLang equivalent) as the generator.
+the harness logic is verifiable without GPU resources; callers wire a real
+generator (e.g. ``lambda msgs: engine.generate(msgs)``, or the vLLM/SGLang
+equivalent) when running against a model.
+
+These are *library* helpers — they are not auto-wired into the CLI run loop.
+For standard capability/instruction benchmarks (MMLU, GSM8K, …) the supported
+entry point is the post-run "Run standard benchmarks" interactive menu action,
+which uses lm-eval-harness (``pip install 'abliterix[bench]'``). Use the helpers
+below directly when you need the jailbreak/tamper-specific sweeps.
 
 These helpers are intentionally NOT a re-implementation of the upstream
 benchmarks — they're the glue layer that lets abliterix sweep a model

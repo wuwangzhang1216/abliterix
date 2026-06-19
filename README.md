@@ -40,6 +40,7 @@ It also ships **HonestAbliterationBench**, a reproducible public benchmark that 
 - [Citation](#citation)
 - [Acknowledgments](#acknowledgments)
 - [Contributing](#contributing)
+- [Community](#community)
 - [License](#license)
 
 ---
@@ -52,6 +53,8 @@ abliterix --model Qwen/Qwen3-4B-Instruct-2507
 ```
 
 That's it. The process is fully automatic — after optimization completes, you can save the model, upload to Hugging Face, or chat with it interactively.
+
+> **Reproducible install (recommended)**: Abliterix uses [uv](https://docs.astral.sh/uv/) and commits a `uv.lock` pinning every dependency, plus a `[tool.uv] exclude-newer` cutoff so lock regeneration can't drift onto a newer dep that breaks the GPU path. If you use uv, clone the repo and run `uv run abliterix --model <model>` to get the exact dependency set the maintainers tested against.
 
 > **Windows**: use `python scripts/run_abliterix.py --model <model>` or set `PYTHONIOENCODING=utf-8` to avoid Rich encoding issues.
 
@@ -200,6 +203,13 @@ Contributions of all kinds are welcome — new model configs, benchmark results,
 The single most impactful contribution is a tested TOML config for a model we don't yet support. Every new config unlocks a new architecture for everyone.
 
 All contributions are released under the [AGPL-3.0](LICENSE) license.
+
+
+## Community
+
+- **Questions & ideas**: [GitHub Discussions](https://github.com/wuwangzhang1216/abliterix/discussions)
+- **Bugs & feature requests**: [GitHub Issues](https://github.com/wuwangzhang1216/abliterix/issues)
+- **Share your models**: tag models you publish with `abliterix` on the Hugging Face Hub so others can find them — browse the growing list at [huggingface.co/models?other=abliterix](https://huggingface.co/models?other=abliterix). Uploading through the built-in menu adds this tag (plus a `reproducible` tag and a `reproduce/` manifest) automatically.
 
 
 ## License

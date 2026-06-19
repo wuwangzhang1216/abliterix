@@ -16,7 +16,7 @@ from rich.table import Table
 from torch import Tensor
 
 from .settings import AbliterixConfig
-from .util import print
+from .util import print, resolve_seed
 
 
 class ResidualAnalyzer:
@@ -202,7 +202,11 @@ class ResidualAnalyzer:
             target_np = self.target_states[:, li, :].detach().cpu().numpy()
 
             stacked = np.vstack((benign_np, target_np))
-            projection = PaCMAP(n_components=2, n_neighbors=30)
+            projection = PaCMAP(
+                n_components=2,
+                n_neighbors=30,
+                random_state=resolve_seed(self.config),
+            )
             pts_2d = projection.fit_transform(stacked, init=prev_embedding)
             prev_embedding = pts_2d
 

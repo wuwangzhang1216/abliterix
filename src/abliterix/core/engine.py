@@ -1535,9 +1535,19 @@ class SteeringEngine:
         return residuals
 
     def extract_hidden_states_batched(self, messages: list[ChatMessage]) -> Tensor:
+        offload = self.config.inference.offload_outputs_to_cpu
         parts = []
         for batch in chunk_batches(messages, self.config.inference.batch_size):
-            parts.append(self.extract_hidden_states(batch))
+            part = self.extract_hidden_states(batch)
+            if offload:
+                # Move each batch's residuals to host RAM immediately so the
+                # full (n_prompts × layers × hidden) stack never co-resides in
+                # VRAM. Vectors are moved back to the compute device when the
+                # steering adapter is applied.
+                part = part.cpu()
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+            parts.append(part)
         return torch.cat(parts, dim=0)
 
     # ------------------------------------------------------------------
@@ -1568,9 +1578,19 @@ class SteeringEngine:
         return stacked.mean(dim=1)
 
     def compute_logprobs_batched(self, messages: list[ChatMessage]) -> Tensor:
+        offload = self.config.inference.offload_outputs_to_cpu
         parts = []
         for batch in chunk_batches(messages, self.config.inference.batch_size):
-            parts.append(self.compute_logprobs(batch))
+            part = self.compute_logprobs(batch)
+            if offload:
+                # Offload per-batch logprobs to host RAM to cap peak VRAM during
+                # baseline capture and per-trial KL. Baseline and current
+                # logprobs both flow through here, so KL is computed device-
+                # consistently (both on CPU when offload is enabled).
+                part = part.cpu()
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+            parts.append(part)
         return torch.cat(parts, dim=0)
 
     # ------------------------------------------------------------------
