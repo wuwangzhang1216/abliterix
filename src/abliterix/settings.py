@@ -919,6 +919,23 @@ class SteeringConfig(BaseModel):
         ),
     )
 
+    cliff_head_layer_band: list[float] = Field(
+        default_factory=lambda: [0.0, 1.0],
+        description=(
+            "Fractional layer range ``[lo, hi]`` that cliff-head selection is "
+            "restricted to. Default ``[0.0, 1.0]`` considers all layers "
+            "(historical behaviour). Bao/Yin et al. (arXiv:2510.06036) show the "
+            "refusal 'cliff' is *amplified in deeper layers* and the suppression "
+            "heads live there, so for reasoning models restrict to the deep band "
+            "(e.g. ``[0.5, 1.0]`` or ``[0.55, 0.95]``): only heads in "
+            "``[round(lo*n_layers), round(hi*n_layers))`` are candidates, and "
+            "within the band each head's alignment score is up-weighted by depth "
+            "so the deepest cliff heads are preferred. This concentrates the "
+            "surgical ablation where the refusal signal actually lives, removing "
+            "refusals at lower capability/KL cost than a depth-agnostic top-k."
+        ),
+    )
+
     # --- Direct-mode weight transforms (grimjim ORBA / biprojected) ---
 
     direct_transform: DirectTransform = Field(
@@ -1029,6 +1046,17 @@ class SteeringConfig(BaseModel):
                 raise ValueError(
                     "cliff_head_strength must be in [0, 1], got "
                     f"{self.cliff_head_strength}."
+                )
+            if (
+                len(self.cliff_head_layer_band) != 2
+                or not 0.0
+                <= self.cliff_head_layer_band[0]
+                < self.cliff_head_layer_band[1]
+                <= 1.0
+            ):
+                raise ValueError(
+                    "cliff_head_layer_band must be a 2-element list [lo, hi] "
+                    f"with 0 <= lo < hi <= 1, got {self.cliff_head_layer_band}."
                 )
         if self.ablate_harmfulness_direction:
             if self.n_directions > 1:

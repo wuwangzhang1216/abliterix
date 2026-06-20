@@ -118,6 +118,7 @@ def identify_safety_heads(
     *,
     top_k_frac: float = 0.03,
     min_heads: int = 1,
+    layer_band: tuple[float, float] = (0.0, 1.0),
 ) -> list[HeadScore]:
     """Score every ``(layer, head)`` by alignment with the refusal direction.
 
@@ -144,8 +145,22 @@ def identify_safety_heads(
     num_heads, head_dim = _get_head_dim(engine)
     n_layers = engine.get_n_layers()
 
+    # Resolve the fractional layer band to a concrete ``[lo, hi)`` layer range.
+    # Default (0.0, 1.0) covers all layers and disables depth weighting, so the
+    # behaviour is byte-identical to the depth-agnostic original. A restricted
+    # band (e.g. (0.5, 1.0)) limits candidates to the deep layers where the
+    # refusal cliff is amplified (Bao/Yin et al.) and up-weights deeper heads.
+    lo_layer = max(0, int(round(layer_band[0] * n_layers)))
+    hi_layer = min(n_layers, int(round(layer_band[1] * n_layers)))
+    if hi_layer <= lo_layer:
+        lo_layer, hi_layer = 0, n_layers  # degenerate band → fall back to all
+    restricted = lo_layer > 0 or hi_layer < n_layers
+    band_span = max(1, hi_layer - lo_layer - 1)
+
     scores: list[HeadScore] = []
     for layer_idx in range(n_layers):
+        if layer_idx < lo_layer or layer_idx >= hi_layer:
+            continue
         modules = engine.steerable_modules(layer_idx)
         o_proj_list = modules.get("attn.o_proj", [])
         if not o_proj_list:
@@ -173,17 +188,30 @@ def identify_safety_heads(
         # Project the refusal direction through each head's column block.
         # head_cols shape: (out_features, head_dim).
         # contrib = || head_cols^T @ v_layer || / ||v_layer||  (norm in float32)
+        # Depth weighting (only when the band is restricted): linearly ramp
+        # the alignment score from 1.0× at the shallow edge to 2.0× at the
+        # deepest layer of the band, so the deepest cliff heads are preferred.
+        depth_w = 1.0
+        if restricted:
+            depth_w = 1.0 + (layer_idx - lo_layer) / band_span
+
         v_norm = torch.linalg.vector_norm(v).clamp(min=1e-8)
         for head in range(num_heads):
             head_cols = W32[:, head * head_dim : (head + 1) * head_dim]
             contrib = (torch.linalg.vector_norm(head_cols.T @ v) / v_norm).item()
-            scores.append(HeadScore(layer=layer_idx, head=head, score=contrib))
+            scores.append(
+                HeadScore(layer=layer_idx, head=head, score=contrib * depth_w)
+            )
 
     if not scores:
         return []
 
     scores.sort(key=lambda s: s.score, reverse=True)
-    k = max(min_heads, int(round(top_k_frac * len(scores))))
+    # Keep "k = top_k_frac of ALL heads": when the band is restricted, size k
+    # against the full head count so the same absolute number of ablations is
+    # concentrated in the deep band (not shrunk to a fraction of the band).
+    denom = (n_layers * num_heads) if restricted else len(scores)
+    k = max(min_heads, int(round(top_k_frac * denom)))
     return scores[: min(k, len(scores))]
 
 
@@ -294,6 +322,7 @@ def run_cliff_head_ablation(
     top_k_frac: float = 0.03,
     strength: float = 1.0,
     min_heads: int = 1,
+    layer_band: tuple[float, float] = (0.0, 1.0),
 ) -> tuple[int, list[HeadScore]]:
     """End-to-end: identify + ablate, returning ``(n_modified, head_list)``.
 
@@ -306,6 +335,7 @@ def run_cliff_head_ablation(
         refusal_vector,
         top_k_frac=top_k_frac,
         min_heads=min_heads,
+        layer_band=layer_band,
     )
     n_modified = apply_cliff_head_ablation(engine, heads, strength=strength)
     return n_modified, heads

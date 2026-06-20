@@ -22,7 +22,7 @@ from peft.tuners.lora.layer import Linear
 from torch import Tensor
 
 from ..settings import AbliterixConfig
-from ..util import resolve_seed
+from ..util import print, resolve_seed
 from ..types import (
     DecayKernel,
     DirectTransform,
@@ -218,6 +218,22 @@ def apply_steering(
         config = engine.config
 
     steering_mode = config.steering.steering_mode
+
+    # Multi-direction subspace steering (``ablate_harmfulness_direction`` or
+    # ``n_directions > 1``) returns a 3D ``(n_dirs, layers+1, hidden)`` tensor.
+    # Only the direct weight-editing path projects out the full per-layer
+    # subspace (steering_vectors[:, layer_idx+1, :]); the LoRA / angular /
+    # spherical / SVF paths index ``[layer_idx+1]`` on dim 0 (the *direction*
+    # axis) and crash with ``IndexError: index N is out of bounds for dimension
+    # 0 with size n_dirs``. Route 3D steering through direct mode so these
+    # features work regardless of the configured steering_mode.
+    if steering_vectors.ndim == 3 and steering_mode != SteeringMode.DIRECT:
+        print(
+            "[yellow]Multi-direction steering (ablate_harmfulness_direction / "
+            f"n_directions>1) requires direct weight editing; overriding "
+            f"steering_mode='{steering_mode.value}' -> 'direct' for this run.[/]"
+        )
+        steering_mode = SteeringMode.DIRECT
 
     # --- Discriminative layer selection -----------------------------------
     discriminative_layers: set[int] | None = None

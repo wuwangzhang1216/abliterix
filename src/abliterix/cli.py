@@ -883,6 +883,7 @@ def run():
                     vectors,
                     top_k_frac=config.steering.cliff_head_top_k_frac,
                     strength=config.steering.cliff_head_strength,
+                    layer_band=tuple(config.steering.cliff_head_layer_band),
                 )
                 if n_modified:
                     by_layer: dict[int, int] = {}

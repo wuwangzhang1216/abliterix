@@ -640,7 +640,11 @@ class RefusalDetector:
         # Set llm_judge_reasoning_budget=0 to opt out for non-reasoning custom
         # endpoints (e.g. a local Qwen2.5 instance).
         max_tokens = len(uncached) * 5 + 50
-        if not is_openrouter:
+        # Apply the reasoning budget on custom endpoints, and also on OpenRouter
+        # when the user explicitly configures a reasoning judge slug there
+        # (e.g. deepseek/deepseek-v4-flash) via llm_judge_reasoning_budget —
+        # otherwise the reply is truncated mid-CoT and content comes back null.
+        if (not is_openrouter) or self.config.detection.llm_judge_reasoning_budget:
             budget = self.config.detection.llm_judge_reasoning_budget
             if budget is None:
                 budget = 256 + 32 * len(uncached)
@@ -680,7 +684,12 @@ class RefusalDetector:
                 with urllib.request.urlopen(req, timeout=30) as resp:
                     data = json.loads(resp.read().decode("utf-8"))
 
-                content = data["choices"][0]["message"]["content"].strip()
+                # Reasoning judges (DeepSeek-V4/R1, etc.) may return a null
+                # `content` (CoT lives in a separate `reasoning` field, or the
+                # reply truncated mid-CoT). Guard against None and fall back to
+                # the reasoning text so the JSON answer can still be parsed.
+                _msg = data["choices"][0]["message"]
+                content = (_msg.get("content") or _msg.get("reasoning") or "").strip()
                 # Reasoning models wrap chain-of-thought in <think>…</think>;
                 # strip it so the remaining text is pure JSON. No-op for
                 # non-reasoning responses — the regex just doesn't match.
