@@ -659,6 +659,19 @@ def _apply_direct_steering(
                         W_new = W - strength * Q @ (Q.T @ W)
                     else:
                         continue
+                    # Norm-preserving subspace ablation (grimjim, generalised to
+                    # the multi-direction / harmfulness-pair case). The
+                    # single-vector path preserves row norms via direct_transform;
+                    # without the equivalent here, a 3D subspace projection (e.g.
+                    # ablate_harmfulness_direction) shrinks row L2 norms and
+                    # perturbs the RMSNorm-expected activation scale, driving KL
+                    # up needlessly. Rescale each row back to its original norm.
+                    if config.steering.weight_normalization != WeightNorm.NONE:
+                        orig_norms = LA.vector_norm(W, dim=1, keepdim=True)
+                        new_norms = LA.vector_norm(W_new, dim=1, keepdim=True).clamp(
+                            min=1e-8
+                        )
+                        W_new = W_new * (orig_norms / new_norms)
                 else:
                     if global_vector is None:
                         v = steering_vectors[layer_idx + 1].to(device)
