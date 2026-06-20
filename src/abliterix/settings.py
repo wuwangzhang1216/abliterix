@@ -614,8 +614,38 @@ class SteeringConfig(BaseModel):
             '"spherical" rotates along geodesics on the activation hypersphere, '
             '"vector_field" uses learned context-dependent steering directions, '
             '"direct" modifies base weights in-place via orthogonal projection '
-            "(required for models with double-norm like Gemma 4 where LoRA is ineffective)."
+            "(required for models with double-norm like Gemma 4 where LoRA is ineffective), "
+            '"ara" = Arbitrary-Rank Ablation: captures per-module I/O on harmless/'
+            "harmful prompts and directly optimises each weight (no refusal "
+            "direction) — for hard reasoning refusers where projection methods "
+            "fail.  ara runs a mini-sweep over ara_* params instead of Optuna."
         ),
+    )
+
+    # --- ARA (Arbitrary-Rank Ablation, Heretic PR #211) settings ---
+    ara_layer_band: list[float] = Field(
+        default_factory=lambda: [0.0, 1.0],
+        description="Fractional [lo, hi] layer range ARA optimises (others untouched).",
+    )
+    ara_preserve_weight: float = Field(
+        default=1.0,
+        description="Weight on the preserve-harmless MSE term in the ARA objective.",
+    )
+    ara_steer_weights: list[float] = Field(
+        default_factory=lambda: [1.0, 2.0, 4.0],
+        description="ARA steer-bad weights to sweep (each gives one Pareto point).",
+    )
+    ara_overcorrect_weights: list[float] = Field(
+        default_factory=lambda: [0.0, 0.5, 1.0],
+        description="ARA over-correction relative weights to sweep.",
+    )
+    ara_neighbor_count: int = Field(
+        default=8, description="k for the kNN distance terms in the ARA objective."
+    )
+    ara_n_steps: int = Field(default=5, description="LBFGS steps per module in ARA.")
+    ara_capture_prompts: int = Field(
+        default=128,
+        description="Number of harmless/harmful prompts used to capture ARA module I/O.",
     )
 
     discriminative_layer_selection: bool = Field(

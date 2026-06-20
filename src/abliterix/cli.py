@@ -769,6 +769,69 @@ def run():
             scorer.score_trial(engine)
             return
 
+        # --- Arbitrary-Rank Ablation (ARA): no refusal direction ----------
+        # Captures per-module I/O on harmless/harmful prompts, then directly
+        # optimises each module's weight against the 3-term ARA objective.
+        # Runs a mini-sweep over (steer, overcorrect) weights — one Pareto
+        # point each — instead of the Optuna direction search.
+        if config.steering.steering_mode == SteeringMode.ARA:
+            from .ara import ARAParameters, ara_abliterate, capture_module_io
+
+            cap = config.steering.ara_capture_prompts
+            n_layers = engine.get_n_layers()
+            lo, hi = config.steering.ara_layer_band
+            start_l = max(0, int(round(lo * n_layers)))
+            end_l = min(n_layers, int(round(hi * n_layers)))
+            n_t = len(scorer.target_msgs)
+            norm_preserve = config.steering.weight_normalization.value != "none"
+
+            print()
+            print(
+                f"ARA: capturing module I/O on {cap} harmless + {cap} harmful prompts, "
+                f"optimising layers [{start_l},{end_l}) (norm_preserve={norm_preserve})..."
+            )
+            good_io = capture_module_io(engine, benign_msgs[:cap])
+            bad_io = capture_module_io(engine, target_msgs[:cap])
+            print(
+                f"* Baseline refusals: [bold]{scorer.baseline_refusal_count}[/]/{n_t}"
+            )
+
+            ara_results: list[tuple[float, float, float, int, int]] = []
+            for sw in config.steering.ara_steer_weights:
+                for ow in config.steering.ara_overcorrect_weights:
+                    engine.restore_baseline()
+                    params = ARAParameters(
+                        start_layer_index=start_l,
+                        end_layer_index=end_l,
+                        preserve_good_behavior_weight=config.steering.ara_preserve_weight,
+                        steer_bad_behavior_weight=sw,
+                        overcorrect_relative_weight=ow,
+                        neighbor_count=config.steering.ara_neighbor_count,
+                        n_steps=config.steering.ara_n_steps,
+                    )
+                    print()
+                    print(f"ARA steer={sw} overcorrect={ow} ...")
+                    n_mod = ara_abliterate(
+                        engine, good_io, bad_io, params, row_norm_preserve=norm_preserve
+                    )
+                    kl, _ld = scorer.measure_kl_and_coherence(engine)
+                    ref = detector.evaluate_compliance(engine, scorer.target_msgs)
+                    print(
+                        f"  * [bold]steer={sw} overcorrect={ow}[/] (mods={n_mod}): "
+                        f"KL=[bold]{kl:.4f}[/] refusals=[bold]{ref}[/]/{n_t}"
+                    )
+                    ara_results.append((sw, ow, kl, ref, n_mod))
+            engine.restore_baseline()
+            print()
+            print(
+                "[bold green]=== ARA mini-sweep Pareto (refusals asc, then KL) ===[/]"
+            )
+            for sw, ow, kl, ref, _m in sorted(ara_results, key=lambda r: (r[3], r[2])):
+                print(
+                    f"  steer={sw} overcorrect={ow}:  refusals={ref}/{n_t}  KL={kl:.4f}"
+                )
+            return
+
         # Compute steering vectors from residual streams.
         print()
         print("Computing per-layer steering vectors...")

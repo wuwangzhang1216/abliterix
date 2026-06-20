@@ -41,6 +41,7 @@ class SteeringMode(str, Enum):
     SPHERICAL = "spherical"
     VECTOR_FIELD = "vector_field"
     DIRECT = "direct"
+    ARA = "ara"  # Arbitrary-Rank Ablation: per-module weight optimisation, no refusal direction
 
 
 class WeightNorm(str, Enum):
