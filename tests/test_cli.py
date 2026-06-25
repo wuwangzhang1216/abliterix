@@ -187,5 +187,9 @@ def test_configure_libraries_disables_grad():
     import torch
     from abliterix.cli import _configure_libraries
 
-    _configure_libraries()
-    assert not torch.is_grad_enabled()
+    was_grad_enabled = torch.is_grad_enabled()
+    try:
+        _configure_libraries()
+        assert not torch.is_grad_enabled()
+    finally:
+        torch.set_grad_enabled(was_grad_enabled)

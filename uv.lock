@@ -16,11 +16,11 @@ resolution-markers = [
 
 [[package]]
 name = "abliterix"
-version = "1.7.0"
+version = "1.8.0"
 source = { editable = "." }
 dependencies = [
     { name = "accelerate" },
-    { name = "bitsandbytes" },
+    { name = "bitsandbytes", marker = "platform_machine != 'arm64' or sys_platform != 'darwin'" },
     { name = "datasets" },
     { name = "hf-transfer" },
     { name = "huggingface-hub" },
@@ -64,7 +64,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "accelerate", specifier = "~=1.10" },
-    { name = "bitsandbytes", specifier = "~=0.45" },
+    { name = "bitsandbytes", marker = "platform_machine != 'arm64' or sys_platform != 'darwin'", specifier = "~=0.45" },
     { name = "datasets", specifier = "~=4.0" },
     { name = "geom-median", marker = "extra == 'research'", specifier = "~=0.1" },
     { name = "gradio", marker = "extra == 'ui'", specifier = "~=5.20" },

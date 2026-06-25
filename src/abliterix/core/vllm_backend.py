@@ -1441,7 +1441,10 @@ class ProjectionCache:
         cache = ProjectionCache()
         cache.steering_vectors = steering_vectors.cpu()
 
-        import bitsandbytes as bnb
+        try:
+            import bitsandbytes as bnb
+        except ImportError:  # pragma: no cover - exercised on macOS arm64 dev envs.
+            bnb = None
         from peft.tuners.lora.layer import Linear
         from typing import cast
 
@@ -1484,6 +1487,12 @@ class ProjectionCache:
                     CB = getattr(base_weight, "CB", None)
 
                     if qs is not None:
+                        if bnb is None:
+                            raise RuntimeError(
+                                "bitsandbytes is required to dequantize 4-bit weights. "
+                                "Use a supported CUDA environment or load an unquantized "
+                                "model for projection-cache builds."
+                            )
                         W = cast(
                             Tensor,
                             bnb.functional.dequantize_4bit(

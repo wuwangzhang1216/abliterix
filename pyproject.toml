@@ -23,7 +23,7 @@ classifiers = [
 ]
 dependencies = [
     "accelerate~=1.10",
-    "bitsandbytes~=0.45",
+    "bitsandbytes~=0.45; sys_platform != 'darwin' or platform_machine != 'arm64'",
     "datasets~=4.0",
     "hf-transfer~=0.1",
     "huggingface-hub~=1.6",

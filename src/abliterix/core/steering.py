@@ -14,7 +14,6 @@ cleanly separated from model-management concerns.
 import math
 from typing import cast
 
-import bitsandbytes as bnb
 import torch
 import torch.linalg as LA
 import torch.nn.functional as F
@@ -31,6 +30,11 @@ from ..types import (
     WeightNorm,
 )
 from ..weight_transforms import apply_direct_transform
+
+try:
+    import bitsandbytes as bnb
+except ImportError:  # pragma: no cover - exercised on macOS arm64 dev envs.
+    bnb = None
 
 # Avoid circular import: accept the engine as a duck-typed object rather
 # than importing SteeringEngine directly.  The caller is responsible for
@@ -386,6 +390,12 @@ def apply_steering(
                 CB = getattr(base_weight, "CB", None)
 
                 if qs is not None:
+                    if bnb is None:
+                        raise RuntimeError(
+                            "bitsandbytes is required to dequantize 4-bit weights. "
+                            "Install abliterix on a supported CUDA platform or use "
+                            "an unquantized model for this path."
+                        )
                     # 4-bit NF4: use cached dequantised weights when available
                     # to avoid repeated expensive dequantisation.
                     mid = id(mod)
