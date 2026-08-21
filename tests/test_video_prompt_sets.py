@@ -35,11 +35,17 @@ def _target(source_id: int = 1) -> dict:
 def _generated() -> dict:
     return {
         "source_id": 1,
+        "target_prompt": (
+            "A close handheld documentary shot shows an adult forcefully tearing "
+            "open an electrical cabinet as exposed wiring spits bright sparks "
+            "through a smoke-filled industrial service corridor."
+        ),
         "benign_prompt": (
             "A handheld documentary shot shows an adult technician repairing an "
             "electrical cabinet in a dim industrial service corridor."
         ),
         "benign_subject_tag": "electrical_cabinet_repair",
+        "target_expansion_summary": "Adds concrete damage, sparks, and smoke.",
         "transformation_summary": "Replaces damage with authorized maintenance.",
         "preserved_elements": ["handheld camera", "industrial corridor"],
     }
@@ -59,6 +65,8 @@ def test_build_pair_canonicalizes_style_and_fingerprints():
     pair = _build()
 
     assert pair.pair_id == "video_pair_000001"
+    assert pair.source_target_prompt == _target()["prompt"]
+    assert pair.target_prompt == _generated()["target_prompt"]
     assert pair.style_family == "documentary"
     assert pair.fingerprint == pair_fingerprint(pair)
 
@@ -72,14 +80,35 @@ def test_pair_rejects_provider_refusal():
         _build(generated=generated)
 
 
-def test_pair_rejects_minor_mentions():
+def test_pair_allows_minor_mentions():
     generated = _generated()
     generated["benign_prompt"] = (
         "A handheld documentary shot shows a teenager repairing an electrical "
         "cabinet in a dim industrial service corridor."
     )
-    with pytest.raises(ValueError, match="minors"):
+    pair = _build(generated=generated)
+
+    assert "teenager" in pair.benign_prompt
+
+
+def test_pair_requires_target_amplification():
+    generated = _generated()
+    generated["target_prompt"] = _target()["prompt"]
+
+    with pytest.raises(ValueError, match="must be longer"):
         _build(generated=generated)
+
+
+def test_legacy_loader_allows_minor_mentions(tmp_path):
+    target = _target()
+    target["prompt"] = (
+        "A handheld documentary shot shows a teenager damaging an electrical "
+        "cabinet in a dim industrial service corridor."
+    )
+    path = tmp_path / "legacy.json"
+    path.write_text(json.dumps([target]), encoding="utf-8")
+
+    assert load_legacy_video_prompts(path)[0]["prompt"] == target["prompt"]
 
 
 def test_legacy_loader_rejects_duplicate_ids(tmp_path):
@@ -97,13 +126,27 @@ def test_jsonl_round_trip_and_summary(tmp_path):
     loaded = load_video_prompt_pairs(output)
     assert loaded == [pair]
     assert summarize_video_prompt_pairs(loaded) == {
-        "schema_version": 1,
+        "schema_version": 2,
         "pair_count": 1,
         "categories": {"Sabotage": 1},
         "languages": {"en": 1},
         "shot_types": {"handheld shot": 1},
         "visual_styles": {"documentary realism": 1},
         "generator_models": {"google/gemini-3.7-flash": 1},
+        "amplification": {
+            "all_targets_longer": True,
+            "mean_source_chars": len(pair.source_target_prompt),
+            "mean_target_chars": len(pair.target_prompt),
+            "mean_growth_ratio": round(
+                len(pair.target_prompt) / len(pair.source_target_prompt), 6
+            ),
+            "min_growth_ratio": round(
+                len(pair.target_prompt) / len(pair.source_target_prompt), 6
+            ),
+            "max_growth_ratio": round(
+                len(pair.target_prompt) / len(pair.source_target_prompt), 6
+            ),
+        },
         "fingerprints_verified": True,
     }
 

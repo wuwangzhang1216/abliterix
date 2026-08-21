@@ -11,9 +11,9 @@ generation, refusal detection, and token-distribution damage metrics.
 This repository provides two H3-oriented building blocks:
 
 1. `abliterix.video_prompt_sets` defines a paired video Prompt Set. Every
-   harmful target has a benign counterfactual with the same language, camera,
-   visual style, and nearby scene semantics. The strict pairing reduces
-   category and presentation confounding during safety-direction research.
+   source target is preserved for provenance, expanded into a higher-intensity
+   harmful target, and paired with a benign counterfactual using the same
+   language, camera, visual style, and nearby scene semantics.
 2. `abliterix.h3_training` validates supervised H3 media manifests and lowers
    them into a shell-free cache/training execution plan for a pinned external
    H3 rectified-flow trainer.
@@ -41,9 +41,10 @@ uv run python scripts/refine_video_prompt_pairs.py \
 ```
 
 The generator never writes credentials. It uses `OPENROUTER_API_KEY` from the
-process environment, writes resumable validated JSONL, canonicalizes the seven
-visual-style families, rejects chat/refusal boilerplate and minor references,
-and fingerprints every pair.
+process environment, writes resumable validated JSONL, amplifies the target
+side without sanitizing it, canonicalizes the seven visual-style families,
+requires every amplified target to be longer than its immutable source,
+rejects malformed chat/refusal boilerplate, and fingerprints every pair.
 
 Prompt pairs alone are suitable for Prompt Set extraction and evaluation. They
 are not supervised H3 training data: a rectified-flow loss requires target

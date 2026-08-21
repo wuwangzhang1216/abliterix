@@ -59,10 +59,6 @@ _PROVIDER_REFUSAL_RE = re.compile(
     r"provide|assist)\b|\bsorry,? but i\b|抱歉[，, ]*(?:我)?(?:无法|不能)(?:帮助|生成|"
     r"创建|提供)|我(?:无法|不能)(?:帮助|生成|创建|提供))"
 )
-_MINOR_RE = re.compile(
-    r"(?i)\b(?:child|children|kid|minor|teen|teenager|boy|girl|schoolchild)\b|"
-    r"未成年|儿童|孩子|男孩|女孩|少年|少女|青少年"
-)
 _SUBJECT_TAG_RE = re.compile(r"^[a-z0-9]+(?:_[a-z0-9]+)*$")
 
 
@@ -85,14 +81,16 @@ class VideoPromptPair(BaseModel):
     shot_type: str = Field(min_length=2)
     visual_style: str
     style_family: str
-    target_prompt: str = Field(min_length=20, max_length=700)
+    source_target_prompt: str = Field(min_length=20, max_length=700)
+    target_prompt: str = Field(min_length=20, max_length=1200)
     benign_prompt: str = Field(min_length=20, max_length=700)
     target_subject_tag: str
     benign_subject_tag: str
+    target_expansion_summary: str = Field(min_length=5, max_length=500)
     transformation_summary: str = Field(min_length=5, max_length=500)
     preserved_elements: list[str] = Field(min_length=2, max_length=8)
     generator_model: str = Field(min_length=3)
-    schema_version: int = 1
+    schema_version: int = 2
     fingerprint: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
 
     @field_validator("category")
@@ -139,11 +137,16 @@ class VideoPromptPair(BaseModel):
             raise ValueError(
                 f"style_family must be {expected_style!r} for {self.visual_style!r}"
             )
+        if len(self.target_prompt) <= len(self.source_target_prompt):
+            raise ValueError(
+                "amplified target_prompt must be longer than source_target_prompt"
+            )
+        if normalize_prompt(self.target_prompt) == normalize_prompt(
+            self.source_target_prompt
+        ):
+            raise ValueError("amplified target_prompt is identical to its source")
         if normalize_prompt(self.target_prompt) == normalize_prompt(self.benign_prompt):
             raise ValueError("target and benign prompts are identical")
-        if _MINOR_RE.search(self.target_prompt) or _MINOR_RE.search(self.benign_prompt):
-            raise ValueError("paired safety prompts must not depict or mention minors")
-
         expected_fingerprint = pair_fingerprint(self)
         if self.fingerprint is None:
             self.fingerprint = expected_fingerprint
@@ -164,6 +167,7 @@ def pair_fingerprint(pair: VideoPromptPair) -> str:
         "shot_type": pair.shot_type,
         "visual_style": pair.visual_style,
         "style_family": pair.style_family,
+        "source_target_prompt": normalize_prompt(pair.source_target_prompt),
         "target_prompt": normalize_prompt(pair.target_prompt),
         "benign_prompt": normalize_prompt(pair.benign_prompt),
         "target_subject_tag": pair.target_subject_tag,
@@ -193,10 +197,12 @@ def build_video_prompt_pair(
         shot_type=target["shot_type"],
         visual_style=target["visual_style"],
         style_family=STYLE_FAMILY_BY_VISUAL_STYLE[target["visual_style"]],
-        target_prompt=target["prompt"],
+        source_target_prompt=target["prompt"],
+        target_prompt=generated["target_prompt"],
         benign_prompt=generated["benign_prompt"],
         target_subject_tag=target["subject_tag"],
         benign_subject_tag=generated["benign_subject_tag"],
+        target_expansion_summary=generated["target_expansion_summary"],
         transformation_summary=generated["transformation_summary"],
         preserved_elements=generated["preserved_elements"],
         generator_model=generator_model,
@@ -234,8 +240,6 @@ def load_legacy_video_prompts(path: str | Path) -> list[dict[str, Any]]:
             raise ValueError(f"row {source_id} has an unknown language")
         if row["visual_style"] not in STYLE_FAMILY_BY_VISUAL_STYLE:
             raise ValueError(f"row {source_id} has an unknown visual style")
-        if _MINOR_RE.search(str(row["prompt"])):
-            raise ValueError(f"row {source_id} mentions a minor")
     return sorted(rows, key=lambda row: int(row["id"]))
 
 
@@ -278,8 +282,13 @@ def summarize_video_prompt_pairs(
 ) -> dict[str, Any]:
     """Return a deterministic audit summary suitable for JSON output."""
     materialized = list(pairs)
+    source_lengths = [len(pair.source_target_prompt) for pair in materialized]
+    target_lengths = [len(pair.target_prompt) for pair in materialized]
+    growth_ratios = [
+        target / source for source, target in zip(source_lengths, target_lengths)
+    ]
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "pair_count": len(materialized),
         "categories": dict(sorted(Counter(p.category for p in materialized).items())),
         "languages": dict(sorted(Counter(p.language for p in materialized).items())),
@@ -290,6 +299,33 @@ def summarize_video_prompt_pairs(
         "generator_models": dict(
             sorted(Counter(p.generator_model for p in materialized).items())
         ),
+        "amplification": {
+            "all_targets_longer": all(
+                target > source
+                for source, target in zip(source_lengths, target_lengths)
+            ),
+            "mean_source_chars": (
+                round(sum(source_lengths) / len(source_lengths), 6)
+                if source_lengths
+                else 0.0
+            ),
+            "mean_target_chars": (
+                round(sum(target_lengths) / len(target_lengths), 6)
+                if target_lengths
+                else 0.0
+            ),
+            "mean_growth_ratio": (
+                round(sum(growth_ratios) / len(growth_ratios), 6)
+                if growth_ratios
+                else 0.0
+            ),
+            "min_growth_ratio": (
+                round(min(growth_ratios), 6) if growth_ratios else 0.0
+            ),
+            "max_growth_ratio": (
+                round(max(growth_ratios), 6) if growth_ratios else 0.0
+            ),
+        },
         "fingerprints_verified": all(
             pair.fingerprint == pair_fingerprint(pair) for pair in materialized
         ),
