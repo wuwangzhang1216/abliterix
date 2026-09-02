@@ -197,6 +197,7 @@ def _upload_model(
         card = ModelCard.load(card_path) if card_path.exists() else None
     else:
         card = ModelCard.load(config.model.model_id)
+    weight_shas: dict[str, str] = {}
     if card is not None:
         if card.data is None:
             card.data = ModelCardData()
@@ -208,10 +209,24 @@ def _upload_model(
             "decensored",
             "abliterated",
         ]
+        # Hash the uploaded shards *before* deciding the tag. Computing them
+        # afterwards (as this did) meant a Hub timeout produced zero hashes,
+        # no SHA256SUMS file, and a model still tagged `reproducible` — the
+        # one guarantee the tag is supposed to make.
+        try:
+            weight_shas = repo_weight_shas(repo_id, token)
+        except Exception as error:  # noqa: BLE001 - Hub I/O raises many types
+            # and any of them must degrade to "not reproducible" rather than
+            # abort an otherwise successful upload.
+            print(f"[yellow]Could not hash uploaded weight shards: {error}[/]")
+
         reproducible, reasons = assess_reproducibility(config)
         if trial.user_attrs.get("steering_recipe") is None:
             reproducible = False
             reasons.append("the winning trial has no exact steering recipe")
+        if not weight_shas:
+            reproducible = False
+            reasons.append("no weight-shard SHA256 checksums could be computed")
         if reproducible:
             card.data.tags.append(REPRODUCE_TAG)
         else:
@@ -231,7 +246,9 @@ def _upload_model(
         )
         card.push_to_hub(repo_id, token=token)
 
-    _upload_reproduce_artifacts(config, scorer, trial, repo_id, token)
+    _upload_reproduce_artifacts(
+        config, scorer, trial, repo_id, token, weight_shas=weight_shas
+    )
 
     print(f"Model uploaded to [bold]{repo_id}[/].")
 
@@ -242,6 +259,7 @@ def _upload_reproduce_artifacts(
     trial,
     repo_id: str,
     token: str | None,
+    weight_shas: dict[str, str] | None = None,
 ):
     """Publish reproduce.json + SHA256SUMS + README.md to the repo's reproduce/ folder.
 
@@ -252,7 +270,8 @@ def _upload_reproduce_artifacts(
 
     try:
         print("Building reproducibility manifest...")
-        weight_shas = repo_weight_shas(repo_id, token)
+        if weight_shas is None:
+            weight_shas = repo_weight_shas(repo_id, token)
         manifest = build_manifest(
             config,
             trial,

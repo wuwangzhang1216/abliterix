@@ -20,6 +20,7 @@ from __future__ import annotations
 import glob
 import os
 import threading
+import traceback
 from dataclasses import dataclass, field
 
 import torch
@@ -137,6 +138,10 @@ def _run_optimisation(
         with _session.lock:
             _session.log_lines.append(msg)
 
+    # Held outside the try so the finally block can always release it —
+    # RefusalDetector opens a sqlite connection that would otherwise leak for
+    # the lifetime of the server process on any error path.
+    detector = None
     try:
         # Build config from UI parameters.
         _log("Loading configuration...")
@@ -279,6 +284,9 @@ def _run_optimisation(
             benign_states=benign_states,
             target_states=target_states,
             progress_callback=_progress_callback,
+            # Makes the "Stop Optimisation" button actually end the sweep;
+            # previously it only set a flag that nothing ever read.
+            should_stop=lambda: _session.should_stop,
         )
         _session.study = study
         completed = [
@@ -305,11 +313,18 @@ def _run_optimisation(
             "(fewest refusals, then lowest KL)."
         )
 
-        detector.close()
-
     except Exception as e:
-        _log(f"ERROR: {e}")
+        # Log the traceback, not just the message: flattening every failure
+        # (OOM, config error, real bug) into one line makes a UI-run failure
+        # effectively undiagnosable.
+        _log(f"ERROR: {type(e).__name__}: {e}")
+        _log(traceback.format_exc())
     finally:
+        if detector is not None:
+            try:
+                detector.close()
+            except Exception:  # noqa: BLE001, S110 - best-effort cleanup
+                pass
         with _session.lock:
             _session.is_running = False
 

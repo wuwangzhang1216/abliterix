@@ -12,6 +12,7 @@ objective evaluation.
 """
 
 import time
+from collections.abc import Callable
 from dataclasses import asdict
 
 import optuna
@@ -49,6 +50,7 @@ def run_search(
     progress_callback=None,
     *,
     steering_vector_variants: dict[str, "torch.Tensor"] | None = None,
+    should_stop: Callable[[], bool] | None = None,
 ) -> optuna.Study:
     """Execute the Optuna optimisation loop and return the completed study.
 
@@ -628,10 +630,21 @@ def run_search(
             study.enqueue_trial(seed, skip_if_exists=True)
             print(f"  seed {i}: {len(seed)} params pinned")
 
+    # ``should_stop`` lets a caller (the Web UI "Stop" button) end the sweep
+    # cleanly between trials. Optuna's post-trial callback is the supported
+    # hook for this: study.stop() makes optimize() return after the current
+    # trial finishes, so already-completed trials stay usable.
+    def _stop_when_requested(_study, _trial) -> None:
+        if should_stop is not None and should_stop():
+            print()
+            print("[yellow]Stop requested — ending the sweep after this trial.[/]")
+            _study.stop()
+
     try:
         study.optimize(
             _objective_safe,
             n_trials=opt.num_trials - _count_complete(),
+            callbacks=[_stop_when_requested],
         )
     except KeyboardInterrupt:
         pass

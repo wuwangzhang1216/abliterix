@@ -60,7 +60,6 @@ def _compute_ot_transform(
         Unit-normalised direction vectors, shape ``(layers+1, hidden_dim)``.
     """
     n_layers = benign_states.shape[1]
-    benign_states.shape[2]
     per_layer = []
 
     for layer_idx in range(n_layers):

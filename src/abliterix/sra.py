@@ -121,7 +121,6 @@ def _spectral_residualize(
         Cleaned refusal vector, shape ``(layers+1, hidden_dim)``.
     """
     n_layers = refusal_vector.shape[0]
-    concept_atoms.shape[0]
     cleaned = []
 
     for layer_idx in range(n_layers):

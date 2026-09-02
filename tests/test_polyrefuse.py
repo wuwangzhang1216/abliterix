@@ -1,5 +1,7 @@
 """Tests for abliterix.polyrefuse — cross-lingual refusal evaluation harness."""
 
+import pytest
+
 from abliterix.polyrefuse import (
     LanguageResult,
     evaluate_per_language,
@@ -77,17 +79,29 @@ def test_evaluate_per_language_sample_responses_cap():
     assert len(results["en"].sample_responses) == 2
 
 
-def test_evaluate_per_language_uses_is_refusal_fallback():
-    """If detector lacks classify_batch, fall back to is_refusal."""
+def test_evaluate_per_language_uses_detect_refusal_fallback():
+    """If detector lacks classify_batch, fall back to detect_refusal."""
 
-    class _IsRefusalOnly:
-        def is_refusal(self, r):
+    class _DetectRefusalOnly:
+        def detect_refusal(self, r):
             return "no" in r.lower()
 
     prompts = {"en": ["x", "y"]}
     gen = _stub_generator({("x", "y"): ["yes please", "no way"]})
-    results = evaluate_per_language(gen, _IsRefusalOnly(), prompts)
+    results = evaluate_per_language(gen, _DetectRefusalOnly(), prompts)
     assert results["en"].n_refused == 1
+
+
+def test_evaluate_per_language_rejects_detector_without_known_api():
+    """A detector with no known API must raise, not silently score 0%."""
+
+    class _Unknown:
+        pass
+
+    prompts = {"en": ["x", "y"]}
+    gen = _stub_generator({("x", "y"): ["yes please", "no way"]})
+    with pytest.raises(TypeError, match="classify_batch"):
+        evaluate_per_language(gen, _Unknown(), prompts)
 
 
 # ---------------------------------------------------------------------------

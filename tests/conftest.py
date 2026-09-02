@@ -1,23 +1,45 @@
 """Shared fixtures for Abliterix tests."""
 
 import sys
+from pathlib import Path
 from types import SimpleNamespace
+
+src_dir = str(Path(__file__).resolve().parent.parent / "src")
+if src_dir not in sys.path:
+    sys.path.insert(0, src_dir)
 
 import pytest
 import torch
 import torch.nn.functional as F
+import torch.utils._pytree as _pytree
+
+if not hasattr(_pytree, "register_constant"):
+
+    def _compat_register_constant(cls):
+        _reg = getattr(
+            _pytree,
+            "register_pytree_node",
+            getattr(_pytree, "_register_pytree_node", None),
+        )
+        if _reg is not None:
+            return _reg(cls, lambda x: ((), x), lambda children, context: context)
+        return cls
+
+    _pytree.register_constant = _compat_register_constant
 
 
-# AbliterixConfig requires --model via CLI.  Inject a dummy value once.
-sys.argv = ["test", "--model.model-id", "test/model-001"]
-
-from abliterix.settings import AbliterixConfig  # noqa: E402
+_orig_argv = list(sys.argv)
+try:
+    sys.argv = ["test", "--model.model-id", "test/model-001"]
+    from abliterix.settings import AbliterixConfig  # noqa: E402
+finally:
+    sys.argv = _orig_argv
 
 
 @pytest.fixture
 def abliterix_config():
     """AbliterixConfig with dummy model ID (no TOML file needed)."""
-    return AbliterixConfig()
+    return AbliterixConfig(model={"model_id": "test/model-001"})
 
 
 @pytest.fixture

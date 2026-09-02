@@ -39,14 +39,28 @@ def _engine_with_layers(layers):
 def test_kda_layer_registers_o_proj_and_q():
     engine = _engine_with_layers([_BailingLayer("kda")])
     found = engine.steerable_modules(0)
-    assert any(m is engine.transformer_layers[0].attention.o_proj for m in found["attn.o_proj"])
-    assert any(m is engine.transformer_layers[0].attention.q_proj for m in found["attn.q_proj"])
-    assert any(m is engine.transformer_layers[0].mlp.down_proj for m in found["mlp.down_proj"])
+    assert any(
+        m is engine.transformer_layers[0].attention.o_proj for m in found["attn.o_proj"]
+    )
+    assert any(
+        m is engine.transformer_layers[0].attention.q_proj for m in found["attn.q_proj"]
+    )
+    assert any(
+        m is engine.transformer_layers[0].mlp.down_proj for m in found["mlp.down_proj"]
+    )
 
 
 def test_mla_layer_registers_dense_as_o_proj():
     engine = _engine_with_layers([_BailingLayer("mla")])
     found = engine.steerable_modules(0)
-    assert any(m is engine.transformer_layers[0].attention.dense for m in found["attn.o_proj"])
-    assert any(m is engine.transformer_layers[0].attention.q_b_proj for m in found["attn.q_b_proj"])
-    assert any(m is engine.transformer_layers[0].attention.kv_b_proj for m in found["attn.kv_b_proj"])
+    assert any(
+        m is engine.transformer_layers[0].attention.dense for m in found["attn.o_proj"]
+    )
+    assert any(
+        m is engine.transformer_layers[0].attention.q_b_proj
+        for m in found["attn.q_b_proj"]
+    )
+    assert any(
+        m is engine.transformer_layers[0].attention.kv_b_proj
+        for m in found["attn.kv_b_proj"]
+    )

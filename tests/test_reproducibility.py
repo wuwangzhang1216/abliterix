@@ -124,7 +124,11 @@ def test_manifest_contains_exact_trial_and_detects_tampering(monkeypatch):
     )
     monkeypatch.setattr("abliterix.reproducibility.collect_packages", lambda: {})
     monkeypatch.setattr("abliterix.reproducibility._git_commit", lambda: None)
-    manifest = build_manifest(_pinned_config(), _trial())
+    manifest = build_manifest(
+        _pinned_config(),
+        _trial(),
+        weight_shas={"model.safetensors": "a" * 64},
+    )
 
     assert manifest["schema_version"] == SCHEMA_VERSION
     assert manifest["reproducible"] is True

@@ -91,6 +91,7 @@ abliterix-abliterate-fp4 = "abliterix.scripts.abliterate_fp4:main"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+pythonpath = ["src"]
 
 [build-system]
 requires = ["uv_build>=0.8.11,<0.9.0"]

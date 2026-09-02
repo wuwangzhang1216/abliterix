@@ -175,11 +175,16 @@ def _sample_responses(
     prompt_ids = enc["input_ids"]
     attention_mask = enc.get("attention_mask")
 
-    torch.manual_seed(seed)
+    # Use a local generator: this runs once per iteration, so
+    # ``torch.manual_seed`` would reseed the *process-global* CPU and CUDA
+    # RNGs each time, leaving every downstream consumer (Optuna samplers,
+    # LoRA init, PaCMAP) with an arbitrary state afterwards.
+    gen = torch.Generator(device=device).manual_seed(seed)
     with torch.no_grad():
         output = policy_model.generate(
             prompt_ids,
             attention_mask=attention_mask,
+            generator=gen,
             do_sample=True,
             temperature=temperature,
             top_p=top_p,

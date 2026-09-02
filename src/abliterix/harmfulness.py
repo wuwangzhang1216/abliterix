@@ -120,6 +120,15 @@ def _harmfulness_direction(
 
         # Outside the mid-band: dampen this layer's harmfulness signal so
         # the optimiser concentrates its budget on mid-layer steering.
+        #
+        # WARNING: this is currently inert. The output contract of this
+        # function is *unit-normalised* per layer (see Returns), so the 0.5
+        # factor is cancelled exactly by the ``/ norm`` division below. Do
+        # NOT "fix" this by scaling after normalisation: downstream applies
+        # each per-layer direction via its own learned LoRA coefficient, so
+        # a non-unit magnitude breaks the documented invariant and the
+        # zero-means-skip sentinel. Making ``layer_band`` effective requires
+        # an API change (e.g. returning a separate per-layer weight tensor).
         if not (lo <= layer_idx < hi):
             v = v * 0.5
 

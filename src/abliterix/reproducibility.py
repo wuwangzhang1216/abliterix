@@ -103,6 +103,11 @@ def _git_commit() -> dict[str, Any] | None:
             text=True,
             timeout=5,
         )
+        # Unknown must not be recorded as clean: a failed `git status`
+        # (corrupt index, dubious-ownership, timeout) would otherwise be
+        # published as a clean checkout and skip the dirty-tree check.
+        if status.returncode != 0:
+            return None
         return {
             "commit": rev.stdout.strip(),
             "dirty": bool(status.stdout.strip()),
@@ -400,6 +405,13 @@ def validate_manifest(manifest: dict[str, Any]) -> None:
     for field in ("vector_index", "parameters", "steering_recipe"):
         if field not in trial or trial[field] is None:
             raise ValueError(f"Reproduce manifest trial is missing {field!r}.")
+    # Without weight hashes the SHA256SUMS half of the guarantee is
+    # unverifiable, so such a manifest must not be accepted for exact replay.
+    if not isinstance(manifest.get("weights"), dict) or not manifest["weights"]:
+        raise ValueError(
+            "Reproduce manifest has no weight SHA256 checksums; exact replay "
+            "cannot be verified."
+        )
 
 
 def manifest_trial(manifest: dict[str, Any]) -> SimpleNamespace:
@@ -470,14 +482,17 @@ def local_weight_shas(model_dir: str | Path) -> dict[str, str]:
     """Compute deterministic SHA256 checksums for exported model weight files."""
     root = Path(model_dir)
     shas: dict[str, str] = {}
-    for path in sorted(root.glob("*")):
+    # rglob: sharded exports nest shards in subdirectories, and a
+    # partially-hashed export would silently pass the non-empty check.
+    for path in sorted(root.rglob("*")):
         if not path.is_file() or not path.name.endswith((".safetensors", ".bin")):
             continue
         digest = hashlib.sha256()
         with path.open("rb") as stream:
             for chunk in iter(lambda: stream.read(1024 * 1024), b""):
                 digest.update(chunk)
-        shas[path.name] = digest.hexdigest()
+        rel_path = path.relative_to(root).as_posix()
+        shas[rel_path] = digest.hexdigest()
     return shas
 
 
@@ -489,19 +504,24 @@ def write_reproduce_artifacts(
     out.mkdir(parents=True, exist_ok=True)
     written: list[Path] = []
 
+    # Explicit utf-8: Path.write_text defaults to the locale encoding
+    # (cp1252 on many Windows hosts), which raises UnicodeEncodeError for a
+    # non-ASCII model id or GPU driver string.
     reproduce_json = out / "reproduce.json"
-    reproduce_json.write_text(json.dumps(manifest, indent=2, sort_keys=False))
+    reproduce_json.write_text(
+        json.dumps(manifest, indent=2, sort_keys=False), encoding="utf-8"
+    )
     written.append(reproduce_json)
 
     weights = manifest.get("weights") or {}
     if weights:
         sha_lines = [f"{sha}  {name}" for name, sha in weights.items()]
         sha_file = out / "SHA256SUMS"
-        sha_file.write_text("\n".join(sha_lines) + "\n")
+        sha_file.write_text("\n".join(sha_lines) + "\n", encoding="utf-8")
         written.append(sha_file)
 
     readme = out / "README.md"
-    readme.write_text(_render_readme(manifest))
+    readme.write_text(_render_readme(manifest), encoding="utf-8")
     written.append(readme)
 
     return written

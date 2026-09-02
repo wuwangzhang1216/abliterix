@@ -113,125 +113,131 @@ def iterative_abliterate(
     )
     print(f"[iterative] Directions per pass: {ic.per_iteration_directions}")
 
-    for iteration in range(ic.max_iterations):
-        print(f"\n[iterative] === Pass {iteration + 1}/{ic.max_iterations} ===")
+    # The loop below mutates live model weights at intermediate strength.
+    # The caller (cli.py) documents that the model comes back at baseline,
+    # so the restore must survive an exception - otherwise an aborted run
+    # leaves a half-ablated model behind under a "restored" contract.
+    try:
+        for iteration in range(ic.max_iterations):
+            print(f"\n[iterative] === Pass {iteration + 1}/{ic.max_iterations} ===")
 
-        # --- Extract directions from current model state ---
-        print(f"[iterative] Extracting {ic.per_iteration_directions} directions...")
-        raw_dirs = compute_steering_vectors(
-            benign_states,
-            target_states,
-            sc.vector_method,
-            sc.orthogonal_projection,
-            winsorize=sc.winsorize_vectors,
-            winsorize_quantile=sc.winsorize_quantile,
-            projected_abliteration=sc.projected_abliteration,
-            ot_components=sc.ot_components,
-            n_directions=ic.per_iteration_directions,
-            sra_base_method=sc.sra_base_method,
-            sra_n_atoms=sc.sra_n_atoms,
-            sra_ridge_alpha=sc.sra_ridge_alpha,
-        )
-
-        # Ensure 3D shape: (n_dirs, layers+1, hidden_dim)
-        if raw_dirs.ndim == 2:
-            raw_dirs = raw_dirs.unsqueeze(0)
-
-        # --- Orthogonalise against previously found directions ---
-        if all_directions:
-            raw_dirs = orthogonalize_against(
-                raw_dirs,
-                all_directions,
-                norm_threshold=ic.convergence_norm_threshold,
+            # --- Extract directions from current model state ---
+            print(f"[iterative] Extracting {ic.per_iteration_directions} directions...")
+            raw_dirs = compute_steering_vectors(
+                benign_states,
+                target_states,
+                sc.vector_method,
+                sc.orthogonal_projection,
+                winsorize=sc.winsorize_vectors,
+                winsorize_quantile=sc.winsorize_quantile,
+                projected_abliteration=sc.projected_abliteration,
+                ot_components=sc.ot_components,
+                n_directions=ic.per_iteration_directions,
+                sra_base_method=sc.sra_base_method,
+                sra_n_atoms=sc.sra_n_atoms,
+                sra_ridge_alpha=sc.sra_ridge_alpha,
             )
 
-        # --- Compute norms for convergence check ---
-        dir_norms = raw_dirs.view(raw_dirs.shape[0], -1).norm(p=2, dim=1)
-        mean_norm = dir_norms.mean().item()
-        active_count = int((dir_norms > 1e-8).sum().item())
+            # Ensure 3D shape: (n_dirs, layers+1, hidden_dim)
+            if raw_dirs.ndim == 2:
+                raw_dirs = raw_dirs.unsqueeze(0)
 
-        if initial_norm is None:
-            initial_norm = mean_norm
+            # --- Orthogonalise against previously found directions ---
+            if all_directions:
+                raw_dirs = orthogonalize_against(
+                    raw_dirs,
+                    all_directions,
+                    norm_threshold=ic.convergence_norm_threshold,
+                )
 
-        relative_norm = mean_norm / max(initial_norm, 1e-8)
+            # --- Compute norms for convergence check ---
+            dir_norms = raw_dirs.view(raw_dirs.shape[0], -1).norm(p=2, dim=1)
+            mean_norm = dir_norms.mean().item()
+            active_count = int((dir_norms > 1e-8).sum().item())
 
-        # --- Cosine similarity check against previous directions ---
-        max_cosine = 0.0
-        if all_directions:
-            prev_flat = torch.cat(all_directions, dim=0)
-            for k in range(raw_dirs.shape[0]):
-                if dir_norms[k] < 1e-8:
-                    continue
-                curr = raw_dirs[k].view(-1).float()
-                for j in range(prev_flat.shape[0]):
-                    prev = prev_flat[j].view(-1).float()
-                    cos = F.cosine_similarity(
-                        curr.unsqueeze(0), prev.unsqueeze(0)
-                    ).item()
-                    max_cosine = max(max_cosine, abs(cos))
+            if initial_norm is None:
+                initial_norm = mean_norm
 
-        iter_stat = {
-            "iteration": iteration + 1,
-            "mean_norm": mean_norm,
-            "relative_norm": relative_norm,
-            "active_directions": active_count,
-            "max_cosine_similarity": max_cosine,
-        }
-        stats.append(iter_stat)
+            relative_norm = mean_norm / max(initial_norm, 1e-8)
 
-        print(
-            f"[iterative] Norm: {mean_norm:.4f} (relative: {relative_norm:.4f}), "
-            f"active: {active_count}/{raw_dirs.shape[0]}, "
-            f"max cosine vs prev: {max_cosine:.4f}"
-        )
+            # --- Cosine similarity check against previous directions ---
+            max_cosine = 0.0
+            if all_directions:
+                prev_flat = torch.cat(all_directions, dim=0)
+                for k in range(raw_dirs.shape[0]):
+                    if dir_norms[k] < 1e-8:
+                        continue
+                    curr = raw_dirs[k].view(-1).float()
+                    for j in range(prev_flat.shape[0]):
+                        prev = prev_flat[j].view(-1).float()
+                        cos = F.cosine_similarity(
+                            curr.unsqueeze(0), prev.unsqueeze(0)
+                        ).item()
+                        max_cosine = max(max_cosine, abs(cos))
 
-        # --- Convergence check ---
-        if active_count == 0:
+            iter_stat = {
+                "iteration": iteration + 1,
+                "mean_norm": mean_norm,
+                "relative_norm": relative_norm,
+                "active_directions": active_count,
+                "max_cosine_similarity": max_cosine,
+            }
+            stats.append(iter_stat)
+
             print(
-                "[iterative] All directions below threshold — converged (no active directions)"
-            )
-            break
-
-        if iteration > 0 and relative_norm < ic.convergence_norm_threshold:
-            print(
-                f"[iterative] Relative norm {relative_norm:.4f} < "
-                f"{ic.convergence_norm_threshold} — converged"
-            )
-            break
-
-        if max_cosine > ic.convergence_cosine_threshold:
-            print(
-                f"[iterative] Max cosine {max_cosine:.4f} > "
-                f"{ic.convergence_cosine_threshold} — converged (rediscovering old directions)"
-            )
-            break
-
-        # --- Accumulate active directions ---
-        active_mask = dir_norms > 1e-8
-        if active_mask.any():
-            all_directions.append(raw_dirs[active_mask])
-
-        # --- Apply direct projection for next iteration ---
-        if iteration < ic.max_iterations - 1:
-            print("[iterative] Projecting out directions from model weights...")
-            profiles = _make_uniform_profiles(engine, intermediate_strength, config)
-            _apply_direct_steering(
-                engine,
-                raw_dirs[active_mask] if active_mask.any() else raw_dirs,
-                None,  # global_vector — use per-layer
-                profiles,
-                config,
-                None,  # discriminative_layers — project all layers
+                f"[iterative] Norm: {mean_norm:.4f} (relative: {relative_norm:.4f}), "
+                f"active: {active_count}/{raw_dirs.shape[0]}, "
+                f"max cosine vs prev: {max_cosine:.4f}"
             )
 
-            # Re-extract residuals from the modified model.
-            print("[iterative] Re-extracting residuals from modified model...")
-            benign_states = engine.extract_hidden_states_batched(benign_msgs)
-            target_states = engine.extract_hidden_states_batched(target_msgs)
+            # --- Convergence check ---
+            if active_count == 0:
+                print(
+                    "[iterative] All directions below threshold — converged (no active directions)"
+                )
+                break
 
-    # --- Restore baseline before returning ---
-    print("\n[iterative] Restoring model to baseline...")
-    engine.restore_baseline()
+            if iteration > 0 and relative_norm < ic.convergence_norm_threshold:
+                print(
+                    f"[iterative] Relative norm {relative_norm:.4f} < "
+                    f"{ic.convergence_norm_threshold} — converged"
+                )
+                break
+
+            if max_cosine > ic.convergence_cosine_threshold:
+                print(
+                    f"[iterative] Max cosine {max_cosine:.4f} > "
+                    f"{ic.convergence_cosine_threshold} — converged (rediscovering old directions)"
+                )
+                break
+
+            # --- Accumulate active directions ---
+            active_mask = dir_norms > 1e-8
+            if active_mask.any():
+                all_directions.append(raw_dirs[active_mask])
+
+            # --- Apply direct projection for next iteration ---
+            if iteration < ic.max_iterations - 1:
+                print("[iterative] Projecting out directions from model weights...")
+                profiles = _make_uniform_profiles(engine, intermediate_strength, config)
+                _apply_direct_steering(
+                    engine,
+                    raw_dirs[active_mask] if active_mask.any() else raw_dirs,
+                    None,  # global_vector — use per-layer
+                    profiles,
+                    config,
+                    None,  # discriminative_layers — project all layers
+                )
+
+                # Re-extract residuals from the modified model.
+                print("[iterative] Re-extracting residuals from modified model...")
+                benign_states = engine.extract_hidden_states_batched(benign_msgs)
+                target_states = engine.extract_hidden_states_batched(target_msgs)
+
+    finally:
+        # --- Restore baseline before returning ---
+        print("\n[iterative] Restoring model to baseline...")
+        engine.restore_baseline()
 
     if not all_directions:
         print("[iterative] WARNING: No directions found across all iterations!")

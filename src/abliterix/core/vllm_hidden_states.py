@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import tempfile
 from typing import Any
 
@@ -213,7 +214,17 @@ def extract_hidden_states_vllm(
     if is_fp8:
         kwargs["quantization"] = "fp8"
 
-    llm = LLM(**kwargs)
+    # ``LLM(**kwargs)`` is the most likely failure point here (OOM, bad
+    # max_model_len, unsupported arch). It has to be inside the try: the
+    # finally block below exists precisely to guarantee teardown, and its
+    # own comment notes that a partially-initialised engine pins the frame
+    # and keeps its VRAM. It also guarantees the temp dir is removed.
+    try:
+        llm = LLM(**kwargs)
+    except BaseException:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+        raise
+
     try:
         # Tokenize prompts.  Flatten every set into a single prompt list and
         # remember each set's slice so we can split hidden states back on return.
@@ -334,8 +345,6 @@ def extract_hidden_states_vllm(
         flush_memory()
 
         # Clean up temp files.
-        import shutil
-
         shutil.rmtree(tmpdir, ignore_errors=True)
 
     return results

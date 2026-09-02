@@ -49,17 +49,19 @@ def _classify_refusals(
 ) -> int:
     """Count refusals in a batch of responses using the project's detector.
 
-    Falls back to a coarse keyword check if the detector doesn't expose a
-    batch-classification API — the unit tests stub a minimal detector
-    that returns booleans, the real RefusalDetector exposes
-    ``classify_batch``.
+    Falls back to per-response classification if the detector doesn't expose
+    a batch API — the real RefusalDetector now exposes ``classify_batch``,
+    and stubs may only expose ``detect_refusal``.
     """
     if hasattr(detector, "classify_batch"):
         return sum(1 for is_refusal in detector.classify_batch(responses) if is_refusal)
-    return sum(
-        1
-        for r in responses
-        if hasattr(detector, "is_refusal") and detector.is_refusal(r)
+    if hasattr(detector, "detect_refusal"):
+        return sum(1 for r in responses if detector.detect_refusal(r))
+    # Previously the fallback checked a nonexistent ``is_refusal`` inside the
+    # comprehension, which silently scored every response as compliant and
+    # reported a 0% refusal rate. Refuse to guess instead.
+    raise TypeError(
+        "detector must expose classify_batch(responses) or detect_refusal(response)"
     )
 
 

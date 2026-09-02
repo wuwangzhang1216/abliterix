@@ -20,6 +20,7 @@ import threading
 import time
 import urllib.request
 from collections import Counter
+from collections.abc import Iterable
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from typing import cast
 
@@ -74,11 +75,22 @@ class ClassificationCache:
     sqlite3 connections are not safe for concurrent reads.
     """
 
-    def __init__(self, cache_dir: str, judge_model: str, prompt_hash: str):
+    def __init__(
+        self,
+        cache_dir: str,
+        judge_model: str,
+        prompt_hash: str,
+        judge_fingerprint: str = "",
+    ):
         self._path = os.path.join(cache_dir, "judge_cache.sqlite3")
         self._lock = threading.Lock()
         self._model = judge_model
         self._prompt_hash = prompt_hash
+        # Anything that can change the verdict for the same (model, prompt,
+        # response) triple. Without this, switching the judge endpoint (e.g.
+        # OpenRouter → a local vLLM server) or the sampling temperature would
+        # silently reuse labels produced by the other configuration.
+        self._judge_fingerprint = judge_fingerprint
         self._conn = sqlite3.connect(self._path, check_same_thread=False)
         self._conn.execute(
             "CREATE TABLE IF NOT EXISTS cache ("
@@ -90,7 +102,10 @@ class ClassificationCache:
         self._conn.commit()
 
     def _key(self, prompt: str, response: str) -> str:
-        blob = f"v{_CACHE_SCHEMA_VERSION}|{self._model}|{self._prompt_hash}|{prompt}|{response}"
+        blob = (
+            f"v{_CACHE_SCHEMA_VERSION}|{self._model}|{self._prompt_hash}"
+            f"|{self._judge_fingerprint}|{prompt}|{response}"
+        )
         return hashlib.sha256(blob.encode("utf-8")).hexdigest()
 
     def get(self, prompt: str, response: str) -> bool | None:
@@ -302,6 +317,24 @@ class RefusalDetector:
         },
     }
 
+    @staticmethod
+    def _judge_fingerprint(config: AbliterixConfig) -> str:
+        """Hash every judge setting that can change a verdict.
+
+        The cache database is a single fixed path shared by every run, so
+        without this the cache would hand back labels produced by a
+        different endpoint or sampling configuration.
+        """
+        det = config.detection
+        fields = (
+            det.llm_judge_base_url,
+            det.llm_judge_temperature,
+            det.llm_judge_use_response_format,
+            det.llm_judge_max_tokens_field,
+            det.llm_judge_reasoning_budget,
+        )
+        return hashlib.sha256(repr(fields).encode("utf-8")).hexdigest()[:16]
+
     def __init__(self, config: AbliterixConfig):
         self.config = config
         self._cache: ClassificationCache | None = None
@@ -329,6 +362,7 @@ class RefusalDetector:
                 config.optimization.checkpoint_dir,
                 config.detection.llm_judge_model,
                 self._judge_prompt_hash,
+                self._judge_fingerprint(config),
             )
 
     def close(self):
@@ -363,8 +397,11 @@ class RefusalDetector:
             if ml in self._POSITIONAL_MARKERS:
                 window = " ".join(words[: self._POSITIONAL_WINDOW])
                 if ml in window:
-                    pos = window.find("sorry")
-                    after = window[pos + 5 :].strip() if pos >= 0 else ""
+                    # Search for the marker that actually matched and step
+                    # past its full length; hardcoding "sorry"/5 only works
+                    # while _POSITIONAL_MARKERS has that single member.
+                    pos = window.find(ml)
+                    after = window[pos + len(ml) :].strip() if pos >= 0 else ""
                     if not after.startswith("for"):
                         return True
             elif ml in norm:
@@ -375,6 +412,17 @@ class RefusalDetector:
                 return True
 
         return False
+
+    def classify_batch(self, responses: Iterable[str]) -> list[bool]:
+        """Classify already-generated *responses*; ``True`` means refusal.
+
+        This is the protocol ``external_eval`` and ``polyrefuse`` document
+        and call. It is the generation-free counterpart of
+        :meth:`evaluate_compliance`: callers that already hold the text (for
+        example a jailbreak harness that produced it) must not have to
+        re-generate it just to score it.
+        """
+        return [self.detect_refusal(response) for response in responses]
 
     def evaluate_compliance(self, engine, target_msgs: list[ChatMessage]) -> int:
         """Count refusals across *target_msgs* using the configured strategy.

@@ -304,7 +304,15 @@ def _speculators_available() -> bool:
         from speculators.data_generation import VllmHiddenStatesGenerator  # noqa: F401
 
         return True
-    except (ImportError, Exception):
+    except ImportError:
+        return False
+    except Exception as error:
+        # ImportError is a subclass of Exception, so the previous
+        # ``except (ImportError, Exception)`` was just ``except Exception``:
+        # a genuine bug in a partially-broken install silently downgraded to
+        # the 10-15x slower HF path with no indication why.
+        print(f"[yellow]speculators detected but unusable ({error}); [/]")
+        print("[yellow]falling back to HuggingFace hidden-state extraction.[/]")
         return False
 
 
@@ -325,7 +333,13 @@ def _vllm_hidden_states_available() -> bool:
         )
 
         return True
-    except (ImportError, Exception):
+    except ImportError:
+        return False
+    except Exception as error:
+        print(
+            f"[yellow]vLLM hidden-states connector detected but unusable ({error}); [/]"
+        )
+        print("[yellow]falling back to HuggingFace hidden-state extraction.[/]")
         return False
 
 
@@ -479,14 +493,19 @@ def _detect_response_prefix(
 # ---------------------------------------------------------------------------
 
 
-def run():
+def run() -> int:
+    """Run the CLI and return a process exit code (0 = success).
+
+    Every abort path returns non-zero so ``--non-interactive`` runs (the
+    documented CI-verification entry point) cannot turn a red build green.
+    """
     # Launch the Gradio Web UI if requested (before config parsing).
     if "--ui" in sys.argv:
         sys.argv.remove("--ui")
         from .webui import launch_ui
 
         launch_ui()
-        return
+        return 0
 
     # Reduce memory fragmentation on multi-GPU setups.
     if (
@@ -505,7 +524,7 @@ def run():
         idx = sys.argv.index("--reproduce")
         if idx + 1 >= len(sys.argv):
             print("[red]--reproduce requires a path to a reproduce.json file.[/]")
-            return
+            return 1
         repro_path = sys.argv[idx + 1]
         del sys.argv[idx : idx + 2]
 
@@ -532,7 +551,7 @@ def run():
     if repro_path is not None:
         config = _load_reproduce_config(repro_path)
         if config is None:
-            return
+            return 1
         from .reproducibility import load_manifest
 
         reproduce_manifest = load_manifest(repro_path)
@@ -550,7 +569,7 @@ def run():
                 "Run [bold]abliterix --help[/] or see [bold]abliterix.toml[/] for details "
                 "about configuration parameters."
             )
-            return
+            return 1
 
     # Validate the default external evaluator before downloading datasets or
     # loading a potentially enormous model. This turns a late multi-hour
@@ -605,7 +624,8 @@ def run():
             storage,
         )
         if result is None:
-            return
+            # Existing checkpoint could not be resumed or restarted.
+            return 1
         config, storage = result
 
     # Load steering-vector source datasets (needed early for speculators path).
@@ -798,7 +818,7 @@ def run():
             engine.restore_baseline()
             print("* Evaluating...")
             scorer.score_trial(engine)
-            return
+            return 0
 
         # Compute steering vectors from residual streams.
         print()
@@ -1369,7 +1389,7 @@ def run():
                 "[bold green]Independent reproduction verified:[/] "
                 f"KL={replay_kl:.6g}, refusals={replay_refusals}."
             )
-            return
+            return 0
 
         study = run_search(
             config,
@@ -1450,7 +1470,7 @@ def run():
                     f"[bold green]Export verified:[/] {len(weight_shas)} weight "
                     "file(s) hashed with SHA256."
                 )
-            return
+            return 0
 
         show_interactive_results(
             study,
@@ -1467,12 +1487,14 @@ def run():
     finally:
         detector.close()
 
+    return 0
+
 
 def main():
     install()  # Rich traceback handler.
 
     try:
-        run()
+        code = run()
     except BaseException as error:
         if isinstance(error, KeyboardInterrupt) or isinstance(
             error.__context__,
@@ -1480,5 +1502,7 @@ def main():
         ):
             print()
             print("[red]Shutting down...[/]")
-        else:
-            raise
+            # 130 is the conventional "terminated by SIGINT" status.
+            sys.exit(130)
+        raise
+    sys.exit(code)
