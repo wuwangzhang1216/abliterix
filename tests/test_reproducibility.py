@@ -124,7 +124,11 @@ def test_manifest_contains_exact_trial_and_detects_tampering(monkeypatch):
     )
     monkeypatch.setattr("abliterix.reproducibility.collect_packages", lambda: {})
     monkeypatch.setattr("abliterix.reproducibility._git_commit", lambda: None)
-    manifest = build_manifest(_pinned_config(), _trial())
+    manifest = build_manifest(
+        _pinned_config(),
+        _trial(),
+        weight_shas={"model.safetensors": "a" * 64},
+    )
 
     assert manifest["schema_version"] == SCHEMA_VERSION
     assert manifest["reproducible"] is True
@@ -148,3 +152,14 @@ def test_metric_reverification_is_strict_for_counts_and_tolerant_for_float():
     findings = compare_reproduction_metrics(manifest, kl_divergence=0.2, refusals=3)
     assert len(findings) == 2
     assert any("refusals" in finding for finding in findings)
+
+
+def test_manifest_without_weight_hashes_is_not_reproducible(monkeypatch):
+    monkeypatch.setattr("abliterix.reproducibility.collect_environment", lambda: {})
+    monkeypatch.setattr("abliterix.reproducibility.collect_packages", lambda: {})
+    monkeypatch.setattr("abliterix.reproducibility._git_commit", lambda: None)
+    manifest = build_manifest(_pinned_config(), _trial(), weight_shas={})
+    assert manifest["reproducible"] is False
+    assert any("SHA256" in reason for reason in manifest["reproducibility_reasons"])
+    with pytest.raises(ValueError, match="SHA256"):
+        validate_manifest(manifest)

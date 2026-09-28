@@ -4,13 +4,11 @@ Tests _compute_objectives() which is pure arithmetic.
 The TrialScorer is constructed by bypassing __init__ (which requires a model).
 """
 
-import sys
 from types import SimpleNamespace
 
 import pytest
 import torch
 
-sys.argv = ["test", "--model.model-id", "dummy/model"]
 
 from abliterix.eval.scorer import (  # noqa: E402
     TrialScorer,

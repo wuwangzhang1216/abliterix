@@ -20,8 +20,9 @@ import threading
 import time
 import urllib.request
 from collections import Counter
+from collections.abc import Iterable
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
-from typing import cast
+from typing import Any, cast
 
 from ..settings import AbliterixConfig
 from ..types import ChatMessage
@@ -74,11 +75,22 @@ class ClassificationCache:
     sqlite3 connections are not safe for concurrent reads.
     """
 
-    def __init__(self, cache_dir: str, judge_model: str, prompt_hash: str):
+    def __init__(
+        self,
+        cache_dir: str,
+        judge_model: str,
+        prompt_hash: str,
+        judge_fingerprint: str = "",
+    ):
         self._path = os.path.join(cache_dir, "judge_cache.sqlite3")
         self._lock = threading.Lock()
         self._model = judge_model
         self._prompt_hash = prompt_hash
+        # Anything that can change the verdict for the same (model, prompt,
+        # response) triple. Without this, switching the judge endpoint (e.g.
+        # OpenRouter → a local vLLM server) or the sampling temperature would
+        # silently reuse labels produced by the other configuration.
+        self._judge_fingerprint = judge_fingerprint
         self._conn = sqlite3.connect(self._path, check_same_thread=False)
         self._conn.execute(
             "CREATE TABLE IF NOT EXISTS cache ("
@@ -90,7 +102,10 @@ class ClassificationCache:
         self._conn.commit()
 
     def _key(self, prompt: str, response: str) -> str:
-        blob = f"v{_CACHE_SCHEMA_VERSION}|{self._model}|{self._prompt_hash}|{prompt}|{response}"
+        blob = (
+            f"v{_CACHE_SCHEMA_VERSION}|{self._model}|{self._prompt_hash}"
+            f"|{self._judge_fingerprint}|{prompt}|{response}"
+        )
         return hashlib.sha256(blob.encode("utf-8")).hexdigest()
 
     def get(self, prompt: str, response: str) -> bool | None:
@@ -302,6 +317,24 @@ class RefusalDetector:
         },
     }
 
+    @staticmethod
+    def _judge_fingerprint(config: AbliterixConfig) -> str:
+        """Hash every judge setting that can change a verdict.
+
+        The cache database is a single fixed path shared by every run, so
+        without this the cache would hand back labels produced by a
+        different endpoint or sampling configuration.
+        """
+        det = config.detection
+        fields = (
+            det.llm_judge_base_url,
+            det.llm_judge_temperature,
+            det.llm_judge_use_response_format,
+            det.llm_judge_max_tokens_field,
+            det.llm_judge_reasoning_budget,
+        )
+        return hashlib.sha256(repr(fields).encode("utf-8")).hexdigest()[:16]
+
     def __init__(self, config: AbliterixConfig):
         self.config = config
         self._cache: ClassificationCache | None = None
@@ -329,6 +362,7 @@ class RefusalDetector:
                 config.optimization.checkpoint_dir,
                 config.detection.llm_judge_model,
                 self._judge_prompt_hash,
+                self._judge_fingerprint(config),
             )
 
     def close(self):
@@ -363,8 +397,11 @@ class RefusalDetector:
             if ml in self._POSITIONAL_MARKERS:
                 window = " ".join(words[: self._POSITIONAL_WINDOW])
                 if ml in window:
-                    pos = window.find("sorry")
-                    after = window[pos + 5 :].strip() if pos >= 0 else ""
+                    # Search for the marker that actually matched and step
+                    # past its full length; hardcoding "sorry"/5 only works
+                    # while _POSITIONAL_MARKERS has that single member.
+                    pos = window.find(ml)
+                    after = window[pos + len(ml) :].strip() if pos >= 0 else ""
                     if not after.startswith("for"):
                         return True
             elif ml in norm:
@@ -375,6 +412,50 @@ class RefusalDetector:
                 return True
 
         return False
+
+    def classify_batch_result(
+        self,
+        responses: Iterable[str],
+        *,
+        prompts: Iterable[str | ChatMessage] | None = None,
+    ) -> ComplianceResult:
+        """Classify existing responses with the configured evaluator.
+
+        Judge mode requires the original prompts and preserves unknown labels.
+        Keyword mode also works without prompts. Neither path regenerates text.
+        """
+        texts = list(responses)
+        questions = list(prompts) if prompts is not None else None
+        if questions is not None and len(questions) != len(texts):
+            raise ValueError("prompts and responses must have the same length")
+        if self.config.detection.llm_judge:
+            if questions is None:
+                raise ValueError("LLM judge classification requires original prompts")
+            pairs: list[tuple[str, str]] = []
+            for question, response in zip(questions, texts):
+                if isinstance(question, ChatMessage):
+                    question = question.user
+                if not isinstance(question, str):
+                    raise TypeError(
+                        "judge prompts must be strings or ChatMessage objects"
+                    )
+                pairs.append((question, response))
+            return self._batch_judge_classify_result(pairs)
+        return ComplianceResult(
+            labels=tuple(self.detect_refusal(response) for response in texts),
+            evaluator="keyword",
+            protocol_version=f"refusal-detector-cache-v{_CACHE_SCHEMA_VERSION}",
+        )
+
+    def classify_batch(
+        self,
+        responses: Iterable[str],
+        *,
+        prompts: Iterable[str | ChatMessage] | None = None,
+    ) -> list[bool]:
+        """Classify existing responses, rejecting unresolved judge verdicts."""
+        result = self.classify_batch_result(responses, prompts=prompts)
+        return cast(list[bool], list(result.require_complete().labels))
 
     def evaluate_compliance(self, engine, target_msgs: list[ChatMessage]) -> int:
         """Count refusals across *target_msgs* using the configured strategy.
@@ -879,3 +960,40 @@ class RefusalDetector:
             protocol_version=self._judge_prompt_hash,
             issues=tuple(sorted(issues)),
         )
+
+
+def classify_response_batch(
+    detector: Any,
+    responses: list[str],
+    prompts: list[Any],
+) -> list[bool]:
+    """Adapt prompt-aware and legacy detectors for strict evaluation harnesses.
+
+    Rich detectors expose ``classify_batch_result(responses, prompts=...)``.
+    Legacy detectors may expose ``classify_batch(responses)`` or
+    ``detect_refusal(response)``. Every response must have one known verdict;
+    transport failures must never be reported as model behavior.
+    """
+    if len(responses) != len(prompts):
+        raise ValueError("generator must return one response per prompt")
+    classify_result = getattr(detector, "classify_batch_result", None)
+    if callable(classify_result):
+        result = classify_result(responses, prompts=prompts)
+        labels = list(result.require_complete().labels)
+    elif callable(getattr(detector, "classify_batch", None)):
+        labels = list(detector.classify_batch(responses))
+    elif callable(getattr(detector, "detect_refusal", None)):
+        labels = [detector.detect_refusal(response) for response in responses]
+    else:
+        raise TypeError(
+            "detector must expose classify_batch_result, classify_batch, "
+            "or detect_refusal"
+        )
+    if len(labels) != len(responses):
+        raise ValueError("detector must return one verdict per response")
+    if any(label is not None and type(label) is not bool for label in labels):
+        raise TypeError("detector verdicts must be bool or None")
+    complete = ComplianceResult(
+        labels=tuple(labels), evaluator="batch", protocol_version="strict-v1"
+    ).require_complete()
+    return cast(list[bool], list(complete.labels))

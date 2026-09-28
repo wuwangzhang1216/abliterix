@@ -71,7 +71,7 @@ def test_export_adapter_rejects_unrepresentable_router_edits(tmp_path):
         steering=SimpleNamespace(steering_mode=SteeringMode.LORA),
     )
     engine.model = object()
-    engine._expert_deltas = [(0, 1, 0.5, object(), object())]
+    engine._expert_deltas = [(0, 1, object())]
 
     with pytest.raises(RuntimeError, match="router/expert"):
         engine.export_adapter(tmp_path)

@@ -1394,7 +1394,9 @@ class SteeringEngine:
     def _init_expert_routing(self):
         """Prepare bookkeeping lists for router/expert weight rollback."""
         self._router_originals: list[tuple[int, int, Tensor]] = []
-        self._expert_deltas: list[tuple[int, int, float, Tensor, Tensor]] = []
+        # ``(layer_idx, expert_idx, original_expert_slice)`` — the untouched
+        # weight slice, not a reconstructible delta.
+        self._expert_deltas: list[tuple[int, int, Tensor]] = []
 
     def identify_safety_experts(
         self,
@@ -1461,20 +1463,25 @@ class SteeringEngine:
         for idx, gate in gates.items():
             handles.append(gate.register_forward_hook(_make_hook(idx)))
 
-        print("  Profiling benign prompts...")
-        active_counts[0] = benign_counts
-        active_tokens[0] = benign_tokens
-        with torch.no_grad():
-            self.extract_hidden_states_batched(benign_msgs)
+        # The profiling passes run two full sweeps over every prompt; an OOM
+        # or dtype error there would otherwise leave every router hook
+        # registered for the rest of the process, mutating counters on every
+        # later forward pass.
+        try:
+            print("  Profiling benign prompts...")
+            active_counts[0] = benign_counts
+            active_tokens[0] = benign_tokens
+            with torch.no_grad():
+                self.extract_hidden_states_batched(benign_msgs)
 
-        print("  Profiling target prompts...")
-        active_counts[0] = target_counts
-        active_tokens[0] = target_tokens
-        with torch.no_grad():
-            self.extract_hidden_states_batched(target_msgs)
-
-        for h in handles:
-            h.remove()
+            print("  Profiling target prompts...")
+            active_counts[0] = target_counts
+            active_tokens[0] = target_tokens
+            with torch.no_grad():
+                self.extract_hidden_states_batched(target_msgs)
+        finally:
+            for h in handles:
+                h.remove()
 
         safety: dict[int, list[tuple[int, float]]] = {}
         for idx, gate in gates.items():
@@ -1518,8 +1525,16 @@ class SteeringEngine:
         if hasattr(self, "_direct_weight_originals"):
             self._direct_weight_originals.clear()
 
-        current_id = getattr(self.model.config, "name_or_path", None)
-        if current_id == self.config.model.model_id and not self.needs_reload:
+        # ``_model_config_name`` is the canonical loader identity and also
+        # falls back to the legacy ``name_or_path`` alias, which transformers
+        # >=5 may drop. Reading only ``name_or_path`` (as this did) yields
+        # ``None`` there, making the comparison always fail and forcing a full
+        # model reload on *every* trial.
+        current_id = _model_config_name(self.model.config)
+        if (
+            current_id == self.config.model.model_id.rstrip("/")
+            and not self.needs_reload
+        ):
             for w in self._lora_b_weights:
                 torch.nn.init.zeros_(w)
 
@@ -1529,18 +1544,31 @@ class SteeringEngine:
                     gate.weight.data[expert_idx] = original_row.to(gate.weight.device)  # ty:ignore[invalid-assignment,no-matching-overload]
             self._router_originals.clear()
 
-            for layer_idx, expert_idx, w, v, vTW in self._expert_deltas:
+            # Write back the exact pre-edit expert slice. Storing the original
+            # (rather than reconstructing it from the applied delta) keeps this
+            # idempotent: when the same fused tensor was also edited by EGA,
+            # the whole-tensor restore above has already undone the expert
+            # edit, and re-applying the inverse delta here would inject a
+            # spurious rank-1 term that would then be cached as the "original"
+            # for the next trial. It also avoids an fp32 round trip, which
+            # silently loses precision for fp8/packed storage dtypes.
+            for layer_idx, expert_idx, original_slice in self._expert_deltas:
                 dp = self._locate_fused_weights(self.transformer_layers[layer_idx])
                 if dp is not None:
-                    W = dp.data[expert_idx].to(torch.float32)
-                    W += (w * torch.outer(v, vTW)).to(device=W.device)
-                    dp.data[expert_idx] = W.to(dp.dtype)
+                    dp.data[expert_idx] = original_slice.to(dp.device).to(dp.dtype)
             self._expert_deltas.clear()
             return
 
         dtype = self.model.dtype
         self.model = None  # ty:ignore[invalid-assignment]
         flush_memory()
+
+        # The dequant cache is keyed by ``id(module)``. Once the old model is
+        # freed the freshly allocated wrappers routinely land on the same
+        # addresses, so a surviving entry would hand the next trial a stale
+        # dequantized weight tensor from a *different* model object.
+        self._dequant_cache.clear()
+        self._dequant_cache_bytes = 0
 
         qconfig = self._build_quant_config()
         extra: dict[str, Any] = {}

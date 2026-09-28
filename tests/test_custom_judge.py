@@ -13,11 +13,8 @@ knobs cover vLLM, Together, DeepInfra, local llama.cpp / LM Studio / Ollama.
 """
 
 import json
-import sys
 from unittest.mock import patch
 
-# Provide a minimal CLI argv so AbliterixConfig doesn't fail on missing --model
-sys.argv = ["test", "--model.model-id", "dummy/model"]
 
 from abliterix.eval.detector import (
     RefusalDetector,

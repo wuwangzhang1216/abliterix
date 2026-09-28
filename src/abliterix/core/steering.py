@@ -1739,15 +1739,45 @@ def _apply_moe_steering(
                                 break
                     if fused_scale is not None:
                         break
+            # Resolve the projection axis with the same helper EGA uses so the
+            # gpt-oss transposed fused layout (hidden on the last axis) is not
+            # silently projected along the wrong axis — and so this edit stays
+            # bit-identical to the offline FP4 repack path.
+            transposed = getattr(engine, "_fused_down_proj_transposed", False)
+            axis_is_in = resolve_ega_axis(
+                tuple(fused.shape), v_dev.shape[0], transposed=transposed
+            )
+            if axis_is_in is None:
+                # Direction matches neither axis: nothing meaningful to ablate
+                # for this layer, but keep processing the remaining layers.
+                continue
+
             for eid, _ in top:
+                if (
+                    hasattr(engine, "_direct_weight_originals")
+                    and fused in engine._direct_weight_originals
+                ):
+                    original_slice = (
+                        engine._direct_weight_originals[fused][eid].detach().clone()
+                    )
+                else:
+                    original_slice = fused.data[eid].detach().clone()
                 if fused_scale is not None:
                     W = _dequantize_fp8_blockwise(fused.data[eid], fused_scale)
                 else:
                     W = fused.data[eid].to(torch.float32)
-                vTW = v_dev.float() @ W
-                W -= expert_w * torch.outer(v_dev.float(), vTW)
+                vf = v_dev.float()
+                if axis_is_in:
+                    # Transposed (gpt-oss): W is (in, out); out = act @ W.
+                    Wv = W @ vf
+                    W -= expert_w * torch.outer(Wv, vf)
+                else:
+                    # Standard: W is (out, in); direction lives on out.
+                    vTW = vf @ W
+                    W -= expert_w * torch.outer(vf, vTW)
                 fused.data[eid] = W.to(fused.dtype)
 
-                engine._expert_deltas.append(
-                    (layer_idx, eid, expert_w, v_dev.float().cpu(), vTW.cpu())
-                )
+                # Store the untouched slice so restore_baseline can write it
+                # back exactly (idempotent w.r.t. the EGA whole-tensor restore
+                # and lossless for fp8/packed storage dtypes).
+                engine._expert_deltas.append((layer_idx, eid, original_slice.to("cpu")))

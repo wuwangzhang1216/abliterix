@@ -46,6 +46,8 @@ from typing import Any
 from torch import Tensor
 from torch.nn import Module
 
+from .util import print
+
 
 # ---------------------------------------------------------------------------
 # Hook factory
@@ -153,13 +155,20 @@ def remove_mote(handle: MoTEHandle) -> int:
     subsequent calls return 0.
     """
     n = 0
+    failed = 0
     for h in handle.handles:
         try:
             h.remove()
             n += 1
-        except Exception:
-            pass
+        except Exception as error:
+            # Don't silently swallow: a hook we failed to remove stays
+            # installed and keeps mutating activations for the rest of the
+            # run, so the caller needs to know.
+            failed += 1
+            print(f"[yellow]Failed to remove a MoTE hook: {error}[/]")
     handle.handles.clear()
+    if failed:
+        print(f"[red]{failed} MoTE hook(s) could not be removed.[/]")
     return n
 
 

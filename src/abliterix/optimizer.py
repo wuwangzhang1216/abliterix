@@ -12,6 +12,7 @@ objective evaluation.
 """
 
 import time
+from collections.abc import Callable
 from dataclasses import asdict
 
 import optuna
@@ -49,8 +50,13 @@ def run_search(
     progress_callback=None,
     *,
     steering_vector_variants: dict[str, "torch.Tensor"] | None = None,
+    should_stop: Callable[[], bool] | None = None,
+    raise_on_interrupt: bool = False,
 ) -> optuna.Study:
     """Execute the Optuna optimisation loop and return the completed study.
+
+    ``raise_on_interrupt`` lets non-interactive callers report SIGINT after
+    trial cleanup. Interactive callers retain the completed study by default.
 
     Parameters
     ----------
@@ -552,6 +558,8 @@ def run_search(
             try:
                 return _objective(trial)
             except KeyboardInterrupt:
+                if raise_on_interrupt:
+                    raise
                 trial.study.stop()
                 raise TrialPruned()
         finally:
@@ -628,13 +636,25 @@ def run_search(
             study.enqueue_trial(seed, skip_if_exists=True)
             print(f"  seed {i}: {len(seed)} params pinned")
 
+    # ``should_stop`` lets a caller (the Web UI "Stop" button) end the sweep
+    # cleanly between trials. Optuna's post-trial callback is the supported
+    # hook for this: study.stop() makes optimize() return after the current
+    # trial finishes, so already-completed trials stay usable.
+    def _stop_when_requested(_study, _trial) -> None:
+        if should_stop is not None and should_stop():
+            print()
+            print("[yellow]Stop requested — ending the sweep after this trial.[/]")
+            _study.stop()
+
     try:
         study.optimize(
             _objective_safe,
             n_trials=opt.num_trials - _count_complete(),
+            callbacks=[_stop_when_requested],
         )
     except KeyboardInterrupt:
-        pass
+        if raise_on_interrupt:
+            raise
 
     if _count_complete() == opt.num_trials:
         study.set_user_attr("finished", True)

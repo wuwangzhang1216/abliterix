@@ -6,7 +6,6 @@ disabled; judge failures are surfaced rather than silently changing strategy.
 """
 
 import json
-import sys
 from random import Random
 
 import pytest
@@ -14,8 +13,6 @@ import pytest
 # TrialScorer init requires a real model; these detector tests stay at the
 # textual and external-API boundaries.
 
-# Provide a minimal CLI argv so AbliterixConfig doesn't fail on missing --model
-sys.argv = ["test", "--model.model-id", "dummy/model"]
 
 from abliterix.eval.detector import RefusalDetector
 from abliterix.eval.metrics import ComplianceResult

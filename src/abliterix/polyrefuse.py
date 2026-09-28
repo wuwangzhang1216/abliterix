@@ -33,6 +33,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from .eval.detector import classify_response_batch
+
 
 @dataclass
 class LanguageResult:
@@ -46,21 +48,10 @@ class LanguageResult:
 def _classify_refusals(
     detector,
     responses: list[str],
+    prompts: list[Any],
 ) -> int:
-    """Count refusals in a batch of responses using the project's detector.
-
-    Falls back to a coarse keyword check if the detector doesn't expose a
-    batch-classification API — the unit tests stub a minimal detector
-    that returns booleans, the real RefusalDetector exposes
-    ``classify_batch``.
-    """
-    if hasattr(detector, "classify_batch"):
-        return sum(1 for is_refusal in detector.classify_batch(responses) if is_refusal)
-    return sum(
-        1
-        for r in responses
-        if hasattr(detector, "is_refusal") and detector.is_refusal(r)
-    )
+    """Count known refusals, preserving the configured evaluator strategy."""
+    return sum(classify_response_batch(detector, responses, prompts))
 
 
 def evaluate_per_language(
@@ -79,8 +70,9 @@ def evaluate_per_language(
         as a list of strings.  In production this is
         ``lambda msgs: engine.generate(msgs)``; in tests it's a stub.
     detector : RefusalDetector-like
-        Must expose ``classify_batch(responses) -> Iterable[bool]`` or
-        ``is_refusal(response) -> bool``.
+        Supports prompt-aware ``classify_batch_result``, legacy
+        ``classify_batch(responses)``, or ``detect_refusal(response)``.
+        Unknown or missing verdicts raise instead of reporting compliance.
     prompt_groups : dict[str, list[ChatMessage]]
         Keyed by ISO 639-1 language code (e.g. ``"en"``, ``"zh"``,
         ``"es"``).  Each value is the list of prompts to evaluate in
@@ -107,7 +99,7 @@ def evaluate_per_language(
             )
             continue
         responses = generator(msgs)
-        n_refused = _classify_refusals(detector, responses)
+        n_refused = _classify_refusals(detector, responses, msgs)
         n_total = len(responses)
         rate = n_refused / n_total if n_total else 0.0
         results[lang] = LanguageResult(

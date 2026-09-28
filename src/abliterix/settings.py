@@ -200,7 +200,7 @@ class ModelConfig(BaseModel):
         ),
     )
 
-    fp8_handling: str = Field(
+    fp8_handling: Literal["auto", "materialize", "forward_dequant", "offline"] = Field(
         default="auto",
         description=(
             "How to handle native-FP8 model weights at load time.\n"
@@ -219,7 +219,10 @@ class ModelConfig(BaseModel):
         ),
     )
 
-    backend: str = Field(
+    # Typed as a Literal so a typo ("vfllm", "HuggingFace") is rejected at
+    # config-load instead of silently falling through to the slow HF path
+    # *and* marking the run non-reproducible.
+    backend: Literal["hf", "vllm", "sglang"] = Field(
         default="hf",
         description=(
             "Inference backend: 'hf' for HuggingFace Transformers (pipeline parallelism), "
@@ -730,7 +733,7 @@ class SteeringConfig(BaseModel):
         ),
     )
 
-    fixed_vector_scope: str | None = Field(
+    fixed_vector_scope: Literal["global", "per layer"] | None = Field(
         default=None,
         description=(
             'Pin the vector scope to one of ``"global"`` or ``"per layer"`` '
@@ -806,6 +809,9 @@ class SteeringConfig(BaseModel):
 
     auto_disable_floor: float = Field(
         default=-0.25,
+        # Documented as "must be ≤ 0"; without this a positive value is
+        # accepted and then silently disables the feature it configures.
+        le=0.0,
         description=(
             "Negative lower bound used for the ``max_weight`` search of every "
             "component listed in ``auto_disable_components``.  The fraction of the "
@@ -1526,13 +1532,17 @@ class DetectionConfig(BaseModel):
         ),
     )
 
+    # ge=1: 0 would make ``range(0, n, 0)`` raise and ThreadPoolExecutor(0)
+    # raise; negative values silently classify nothing.
     llm_judge_batch_size: int = Field(
         default=10,
+        ge=1,
         description="Responses per API request when using the LLM judge.",
     )
 
     llm_judge_concurrency: int = Field(
         default=10,
+        ge=1,
         description="Maximum parallel API requests for LLM judge classification.",
     )
 
@@ -1555,7 +1565,7 @@ class ExpertConfig(BaseModel):
         description="Search interval [lo, hi] for per-expert down-projection steering weight.",
     )
 
-    profiling_method: str = Field(
+    profiling_method: Literal["standard", "safex"] = Field(
         default="standard",
         description=(
             "Safety-expert scoring strategy.  'standard' uses the historical "
@@ -1766,7 +1776,7 @@ class IterativeConfig(BaseModel):
         ),
     )
 
-    accumulation_method: str = Field(
+    accumulation_method: Literal["subspace", "stack"] = Field(
         default="subspace",
         description=(
             "How to combine directions across iterations.  "
@@ -2119,10 +2129,16 @@ class AbliterixConfig(BaseSettings):
         file_secret_settings: PydanticBaseSettingsSource,
     ) -> tuple[PydanticBaseSettingsSource, ...]:
         # Determine TOML path: --config flag > AX_CONFIG env > default.
+        # Both ``--config path`` and ``--config=path`` are accepted —
+        # CliSettingsSource itself parses the equals form, so ignoring it here
+        # silently loaded the default file instead of the user's.
         config_path = os.environ.get("AX_CONFIG", "abliterix.toml")
         for i, arg in enumerate(sys.argv):
             if arg == "--config" and i + 1 < len(sys.argv):
                 config_path = sys.argv[i + 1]
+                break
+            if arg.startswith("--config="):
+                config_path = arg.split("=", 1)[1]
                 break
 
         return (

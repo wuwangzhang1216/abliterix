@@ -175,18 +175,33 @@ def _sample_responses(
     prompt_ids = enc["input_ids"]
     attention_mask = enc.get("attention_mask")
 
-    torch.manual_seed(seed)
-    with torch.no_grad():
-        output = policy_model.generate(
-            prompt_ids,
-            attention_mask=attention_mask,
-            do_sample=True,
-            temperature=temperature,
-            top_p=top_p,
-            max_new_tokens=max_new_tokens,
-            pad_token_id=tokenizer.pad_token_id or tokenizer.eos_token_id,
-            return_dict_in_generate=True,
-        )
+    # HF generate() samples from the default RNG, not a generator kwarg.
+    # Snapshot every CUDA RNG for sharded models; seed only the backend we
+    # will use, so a CPU run does not alter an unrelated accelerator's RNG.
+    cuda_devices = (
+        list(range(torch.cuda.device_count())) if device.type == "cuda" else []
+    )
+    mps_state = torch.mps.get_rng_state() if device.type == "mps" else None
+    try:
+        with torch.random.fork_rng(devices=cuda_devices), torch.no_grad():
+            torch.random.default_generator.manual_seed(seed)
+            if cuda_devices:
+                torch.cuda.manual_seed_all(seed)
+            if mps_state is not None:
+                torch.mps.manual_seed(seed)
+            output = policy_model.generate(
+                prompt_ids,
+                attention_mask=attention_mask,
+                do_sample=True,
+                temperature=temperature,
+                top_p=top_p,
+                max_new_tokens=max_new_tokens,
+                pad_token_id=tokenizer.pad_token_id or tokenizer.eos_token_id,
+                return_dict_in_generate=True,
+            )
+    finally:
+        if mps_state is not None:
+            torch.mps.set_rng_state(mps_state)
 
     full_ids = output.sequences
     response_ids = full_ids[:, prompt_ids.shape[1] :]

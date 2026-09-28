@@ -41,6 +41,13 @@ def _extract_candidate_directions(
         Maps each candidate to its source layer and sub-group.
     """
     n_layers = benign_states.shape[1]
+    # torch.chunk raises an opaque "chunks must be greater than 0" for an
+    # empty prompt set; surface a clear error instead.
+    if benign_states.shape[0] == 0 or target_states.shape[0] == 0:
+        raise ValueError(
+            "COSMIC direction selection requires at least one benign and one "
+            "target prompt."
+        )
     n_groups = min(n_token_positions, benign_states.shape[0])
     b_chunks = torch.chunk(benign_states, n_groups, dim=0)
     t_chunks = torch.chunk(target_states, n_groups, dim=0)
@@ -137,7 +144,6 @@ def select_cosmic_direction(
         Indices of the most discriminative layers (bottom_pct by cosine similarity).
     """
     n_layers = benign_states.shape[1]
-    benign_states.shape[2]
 
     # Step 1: Identify evaluation layers (lowest cosine similarity = strongest refusal encoding).
     cos_sim = _compute_layer_discriminability(benign_states, target_states)

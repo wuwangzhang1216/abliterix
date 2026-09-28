@@ -2,8 +2,6 @@
 
 import sys
 
-# AbliterixConfig requires --model via CLI or TOML.  We inject a dummy value.
-sys.argv = ["test", "--model.model-id", "test/model-001"]
 
 from abliterix.settings import (
     DetectionConfig,
