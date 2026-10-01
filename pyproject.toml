@@ -62,7 +62,7 @@ vllm = [
     # `VLLM_ALLOW_INSECURE_SERIALIZATION` (PR #35928, v0.18.0) for
     # `collective_rpc` callable pickling. Upper bound is the next minor we
     # have not yet smoke-tested; bump after a green CI run.
-    "vllm>=0.18,<0.21",
+    "vllm>=0.18,<0.24",
     "speculators>=0.1.9",
 ]
 # sglang extra removed from pyproject.toml due to dependency conflict
