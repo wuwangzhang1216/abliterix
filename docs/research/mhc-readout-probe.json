@@ -1,0 +1,663 @@
+{
+  "scope": "Read-only CPU FP32 native attention gates and RMSNorm, compared with an independent FP64 formula. No full checkpoint forward or model-quality measurement.",
+  "python": "3.12.2",
+  "transformers": "5.20.2",
+  "torch": "2.11.0+cpu",
+  "token_ids": [
+    17,
+    18,
+    19
+  ],
+  "synthetic_seed": 20261102,
+  "atol": 2e-06,
+  "rtol": 2e-05,
+  "relative_l2_denominator": "second operand",
+  "max_download_bytes": 12000000,
+  "response_body_bytes_read": 5646797,
+  "models": [
+    {
+      "repo": "deepseek-ai/DeepSeek-V4-Flash",
+      "revision": "60d8d70770c6776ff598c94bb586a859a38244f1",
+      "index_url": "https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash/blob/60d8d70770c6776ff598c94bb586a859a38244f1/model.safetensors.index.json",
+      "upstream_module": "transformers.models.deepseek_v4.modeling_deepseek_v4",
+      "upstream_source_sha256": "d6eb834f9d10eca879ca5390f219259eb452d19e1cf72d827f4334cbe4682266",
+      "layers": [
+        {
+          "layer": 0,
+          "site": "attention",
+          "input_source": "published embedding rows broadcast to all streams as at decoder entry",
+          "shape": [
+            1,
+            3,
+            4,
+            4096
+          ],
+          "pointwise_matches": {
+            "pre_norm": true,
+            "post_norm": true
+          },
+          "native_vs_fp64_reference": {
+            "max_abs": 3.0101776071767006e-08,
+            "relative_l2": 5.296399024326899e-08,
+            "mean_token_cosine": 1.0000000000000002
+          },
+          "normalized_native_vs_fp64_reference": {
+            "max_abs": 1.060362077309751e-08,
+            "relative_l2": 5.195933812962729e-08,
+            "mean_token_cosine": 0.9999999999999996
+          },
+          "raw_mean_vs_native": {
+            "max_abs": 0.27832067012786865,
+            "relative_l2": 0.7500002383455859,
+            "mean_token_cosine": 1.0000000000000002
+          },
+          "normalized_raw_mean_vs_normalized_native": {
+            "max_abs": 0.00010737776756286621,
+            "relative_l2": 0.0009283309092667247,
+            "mean_token_cosine": 0.9999999999999997
+          }
+        },
+        {
+          "layer": 21,
+          "site": "attention",
+          "input_source": "synthetic independent standard-normal streams, not a recorded model activation",
+          "shape": [
+            1,
+            3,
+            4,
+            4096
+          ],
+          "pointwise_matches": {
+            "pre_norm": true,
+            "post_norm": true
+          },
+          "native_vs_fp64_reference": {
+            "max_abs": 5.99761497355189e-07,
+            "relative_l2": 9.738023341968766e-08,
+            "mean_token_cosine": 0.9999999999999977
+          },
+          "normalized_native_vs_fp64_reference": {
+            "max_abs": 2.5440826056932764e-08,
+            "relative_l2": 9.48875058656197e-08,
+            "mean_token_cosine": 0.9999999999999964
+          },
+          "raw_mean_vs_native": {
+            "max_abs": 2.907894492149353,
+            "relative_l2": 0.763039646247428,
+            "mean_token_cosine": 0.6621634250333509
+          },
+          "normalized_raw_mean_vs_normalized_native": {
+            "max_abs": 0.16230888105928898,
+            "relative_l2": 0.8223145946154037,
+            "mean_token_cosine": 0.6619862682118566
+          }
+        }
+      ]
+    },
+    {
+      "repo": "zai-org/GLM-5.3-Flash",
+      "revision": "46a050bec13002ad29ee795c16e61cf4fa3c4a9c",
+      "index_url": "https://huggingface.co/zai-org/GLM-5.3-Flash/blob/46a050bec13002ad29ee795c16e61cf4fa3c4a9c/model.safetensors.index.json",
+      "upstream_module": "transformers.models.glm5_next.modeling_glm5_next",
+      "upstream_source_sha256": "2e8a08614860e5117a410080df42e67e7947bfdd116e90c19e46229c2d7ea645",
+      "layers": [
+        {
+          "layer": 0,
+          "site": "attention",
+          "input_source": "published embedding rows broadcast to all streams as at decoder entry",
+          "shape": [
+            1,
+            3,
+            4,
+            4096
+          ],
+          "pointwise_matches": {
+            "pre_norm": true,
+            "post_norm": true
+          },
+          "native_vs_fp64_reference": {
+            "max_abs": 1.5157434335444364e-09,
+            "relative_l2": 7.627057038011008e-08,
+            "mean_token_cosine": 0.9999999999999997
+          },
+          "normalized_native_vs_fp64_reference": {
+            "max_abs": 3.862502698237513e-08,
+            "relative_l2": 9.605289545270523e-08,
+            "mean_token_cosine": 0.999999999999999
+          },
+          "raw_mean_vs_native": {
+            "max_abs": 0.011991918087005615,
+            "relative_l2": 0.9623858167246963,
+            "mean_token_cosine": 0.9999999999999996
+          },
+          "normalized_raw_mean_vs_normalized_native": {
+            "max_abs": 0.09813487529754639,
+            "relative_l2": 0.36474653370129995,
+            "mean_token_cosine": 0.9999999999999987
+          }
+        },
+        {
+          "layer": 22,
+          "site": "attention",
+          "input_source": "synthetic independent standard-normal streams, not a recorded model activation",
+          "shape": [
+            1,
+            3,
+            4,
+            4096
+          ],
+          "pointwise_matches": {
+            "pre_norm": true,
+            "post_norm": true
+          },
+          "native_vs_fp64_reference": {
+            "max_abs": 1.847040360658525e-07,
+            "relative_l2": 7.582082912620302e-08,
+            "mean_token_cosine": 0.9999999999999997
+          },
+          "normalized_native_vs_fp64_reference": {
+            "max_abs": 1.0347926371334637e-07,
+            "relative_l2": 6.137741858229288e-08,
+            "mean_token_cosine": 0.9999999999999992
+          },
+          "raw_mean_vs_native": {
+            "max_abs": 1.749186396598816,
+            "relative_l2": 1.1952303880146755,
+            "mean_token_cosine": 0.50677475302356
+          },
+          "normalized_raw_mean_vs_normalized_native": {
+            "max_abs": 0.8065135478973389,
+            "relative_l2": 0.9934604696128309,
+            "mean_token_cosine": 0.5065264787782878
+          }
+        }
+      ]
+    }
+  ],
+  "retrievals": [
+    {
+      "repo": "deepseek-ai/DeepSeek-V4-Flash",
+      "revision": "60d8d70770c6776ff598c94bb586a859a38244f1",
+      "file": "config.json",
+      "purpose": "checkpoint_config",
+      "bytes": 1749,
+      "sha256": "b628e63398a645abc711d92207f8737dd8140f7a4ef1e0a5b3616019e0ddd818"
+    },
+    {
+      "repo": "deepseek-ai/DeepSeek-V4-Flash",
+      "revision": "60d8d70770c6776ff598c94bb586a859a38244f1",
+      "file": "model-00001-of-00046.safetensors",
+      "purpose": "header_length",
+      "bytes": 8,
+      "sha256": "f42ba14217e1949bb569920b87aefd4ebd5d172374fcc775fb8c074247384488",
+      "byte_range_inclusive": [
+        0,
+        7
+      ],
+      "shard_bytes": 1059061856
+    },
+    {
+      "repo": "deepseek-ai/DeepSeek-V4-Flash",
+      "revision": "60d8d70770c6776ff598c94bb586a859a38244f1",
+      "file": "model-00001-of-00046.safetensors",
+      "purpose": "safetensors_header",
+      "bytes": 88,
+      "sha256": "7bdd252c75d1e8975a69b8399b226f0129ce119b23da7bd68deac4ba4b1a4a40",
+      "byte_range_inclusive": [
+        8,
+        95
+      ],
+      "shard_bytes": 1059061856
+    },
+    {
+      "repo": "deepseek-ai/DeepSeek-V4-Flash",
+      "revision": "60d8d70770c6776ff598c94bb586a859a38244f1",
+      "file": "model-00001-of-00046.safetensors",
+      "purpose": "embed.weight",
+      "bytes": 24576,
+      "sha256": "d0e4cad6f30f4d7170bd0b1dcb7749306480de5a24324ec76d1d240073820d8c",
+      "byte_range_inclusive": [
+        139360,
+        163935
+      ],
+      "shard_bytes": 1059061856,
+      "storage_dtype": "BF16",
+      "selected_shape": [
+        3,
+        4096
+      ]
+    },
+    {
+      "repo": "deepseek-ai/DeepSeek-V4-Flash",
+      "revision": "60d8d70770c6776ff598c94bb586a859a38244f1",
+      "file": "model-00002-of-00046.safetensors",
+      "purpose": "header_length",
+      "bytes": 8,
+      "sha256": "39861e5f60db339a6cad68319214a862aa35787c1157a8a0e108db18d10d6f97",
+      "byte_range_inclusive": [
+        0,
+        7
+      ],
+      "shard_bytes": 3566321192
+    },
+    {
+      "repo": "deepseek-ai/DeepSeek-V4-Flash",
+      "revision": "60d8d70770c6776ff598c94bb586a859a38244f1",
+      "file": "model-00002-of-00046.safetensors",
+      "purpose": "safetensors_header",
+      "bytes": 172232,
+      "sha256": "adbe0338649aec4a8099bd12e7f99b18b3497f73b38345f84ecb1c46eca9d992",
+      "byte_range_inclusive": [
+        8,
+        172239
+      ],
+      "shard_bytes": 3566321192
+    },
+    {
+      "repo": "deepseek-ai/DeepSeek-V4-Flash",
+      "revision": "60d8d70770c6776ff598c94bb586a859a38244f1",
+      "file": "model-00002-of-00046.safetensors",
+      "purpose": "layers.0.hc_attn_fn",
+      "bytes": 1572864,
+      "sha256": "8a428deaca9410e5678abb77147f04aa6fe5357a3d96ee124bfd17b0788b4b3f",
+      "byte_range_inclusive": [
+        6378032,
+        7950895
+      ],
+      "shard_bytes": 3566321192,
+      "storage_dtype": "F32",
+      "selected_shape": [
+        24,
+        16384
+      ]
+    },
+    {
+      "repo": "deepseek-ai/DeepSeek-V4-Flash",
+      "revision": "60d8d70770c6776ff598c94bb586a859a38244f1",
+      "file": "model-00002-of-00046.safetensors",
+      "purpose": "layers.0.hc_attn_base",
+      "bytes": 96,
+      "sha256": "ae3e44add38a14ce4b99444e4149929d029cf786ff4aa7773ffa1f969a3822cf",
+      "byte_range_inclusive": [
+        6377936,
+        6378031
+      ],
+      "shard_bytes": 3566321192,
+      "storage_dtype": "F32",
+      "selected_shape": [
+        24
+      ]
+    },
+    {
+      "repo": "deepseek-ai/DeepSeek-V4-Flash",
+      "revision": "60d8d70770c6776ff598c94bb586a859a38244f1",
+      "file": "model-00002-of-00046.safetensors",
+      "purpose": "layers.0.hc_attn_scale",
+      "bytes": 12,
+      "sha256": "c0c88d3234cd60792681264e61e967a5c281bb349a744898b4d032a929652720",
+      "byte_range_inclusive": [
+        7950896,
+        7950907
+      ],
+      "shard_bytes": 3566321192,
+      "storage_dtype": "F32",
+      "selected_shape": [
+        3
+      ]
+    },
+    {
+      "repo": "deepseek-ai/DeepSeek-V4-Flash",
+      "revision": "60d8d70770c6776ff598c94bb586a859a38244f1",
+      "file": "model-00002-of-00046.safetensors",
+      "purpose": "layers.0.attn_norm.weight",
+      "bytes": 8192,
+      "sha256": "e10e7297dbcabbc3d4175b51bd8cfbb7bc6e280c4e4a654bc934c0c0621566f3",
+      "byte_range_inclusive": [
+        9526952,
+        9535143
+      ],
+      "shard_bytes": 3566321192,
+      "storage_dtype": "BF16",
+      "selected_shape": [
+        4096
+      ]
+    },
+    {
+      "repo": "deepseek-ai/DeepSeek-V4-Flash",
+      "revision": "60d8d70770c6776ff598c94bb586a859a38244f1",
+      "file": "model-00023-of-00046.safetensors",
+      "purpose": "header_length",
+      "bytes": 8,
+      "sha256": "ec33aa0687a7e03a963bd7a5c47a1872fa621133609393999dcac2182e58191b",
+      "byte_range_inclusive": [
+        0,
+        7
+      ],
+      "shard_bytes": 3568770544
+    },
+    {
+      "repo": "deepseek-ai/DeepSeek-V4-Flash",
+      "revision": "60d8d70770c6776ff598c94bb586a859a38244f1",
+      "file": "model-00023-of-00046.safetensors",
+      "purpose": "safetensors_header",
+      "bytes": 174224,
+      "sha256": "c834cc39b1bfab2222a6e61d61cd897012694f46b395cbb8c5dcee273667e875",
+      "byte_range_inclusive": [
+        8,
+        174231
+      ],
+      "shard_bytes": 3568770544
+    },
+    {
+      "repo": "deepseek-ai/DeepSeek-V4-Flash",
+      "revision": "60d8d70770c6776ff598c94bb586a859a38244f1",
+      "file": "model-00023-of-00046.safetensors",
+      "purpose": "layers.21.hc_attn_fn",
+      "bytes": 1572864,
+      "sha256": "322f39b177e883068a6a3eb0c85e3f7501c7f4c03024dbe9e704be0c8192634c",
+      "byte_range_inclusive": [
+        437752,
+        2010615
+      ],
+      "shard_bytes": 3568770544,
+      "storage_dtype": "F32",
+      "selected_shape": [
+        24,
+        16384
+      ]
+    },
+    {
+      "repo": "deepseek-ai/DeepSeek-V4-Flash",
+      "revision": "60d8d70770c6776ff598c94bb586a859a38244f1",
+      "file": "model-00023-of-00046.safetensors",
+      "purpose": "layers.21.hc_attn_base",
+      "bytes": 96,
+      "sha256": "a6fd033675d87c37c94c32677495c957d10ac8daa21db060d1ca85db319c8c4b",
+      "byte_range_inclusive": [
+        437656,
+        437751
+      ],
+      "shard_bytes": 3568770544,
+      "storage_dtype": "F32",
+      "selected_shape": [
+        24
+      ]
+    },
+    {
+      "repo": "deepseek-ai/DeepSeek-V4-Flash",
+      "revision": "60d8d70770c6776ff598c94bb586a859a38244f1",
+      "file": "model-00023-of-00046.safetensors",
+      "purpose": "layers.21.hc_attn_scale",
+      "bytes": 12,
+      "sha256": "391895e8a32045bb149888cd97e94e489d98c47d4e4995ef23038a34f360fafa",
+      "byte_range_inclusive": [
+        2010616,
+        2010627
+      ],
+      "shard_bytes": 3568770544,
+      "storage_dtype": "F32",
+      "selected_shape": [
+        3
+      ]
+    },
+    {
+      "repo": "deepseek-ai/DeepSeek-V4-Flash",
+      "revision": "60d8d70770c6776ff598c94bb586a859a38244f1",
+      "file": "model-00023-of-00046.safetensors",
+      "purpose": "layers.21.attn_norm.weight",
+      "bytes": 8192,
+      "sha256": "5c98d5488713d969e354a2c5db59491450058860e4214617539cf50a3d9ddaeb",
+      "byte_range_inclusive": [
+        11976304,
+        11984495
+      ],
+      "shard_bytes": 3568770544,
+      "storage_dtype": "BF16",
+      "selected_shape": [
+        4096
+      ]
+    },
+    {
+      "repo": "zai-org/GLM-5.3-Flash",
+      "revision": "46a050bec13002ad29ee795c16e61cf4fa3c4a9c",
+      "file": "config.json",
+      "purpose": "checkpoint_config",
+      "bytes": 69416,
+      "sha256": "bb8f01c42cb92a52ca72e65afb4d5bd8d11aef083cd210e8de25dfb904f23e9f"
+    },
+    {
+      "repo": "zai-org/GLM-5.3-Flash",
+      "revision": "46a050bec13002ad29ee795c16e61cf4fa3c4a9c",
+      "file": "model-00001-of-00062.safetensors",
+      "purpose": "header_length",
+      "bytes": 8,
+      "sha256": "7171ffc351896bf67e7591b13f7d26bbd80424c8ebf1780bc6a36b089b015562",
+      "byte_range_inclusive": [
+        0,
+        7
+      ],
+      "shard_bytes": 5365306704
+    },
+    {
+      "repo": "zai-org/GLM-5.3-Flash",
+      "revision": "46a050bec13002ad29ee795c16e61cf4fa3c4a9c",
+      "file": "model-00001-of-00062.safetensors",
+      "purpose": "safetensors_header",
+      "bytes": 93512,
+      "sha256": "e18e7ff23ee5bfbd2cf7bf9c931ad99972b50e7c9184babdff42db46ccaf8ab2",
+      "byte_range_inclusive": [
+        8,
+        93519
+      ],
+      "shard_bytes": 5365306704
+    },
+    {
+      "repo": "zai-org/GLM-5.3-Flash",
+      "revision": "46a050bec13002ad29ee795c16e61cf4fa3c4a9c",
+      "file": "model-00001-of-00062.safetensors",
+      "purpose": "model.language_model.embed_tokens.weight",
+      "bytes": 24576,
+      "sha256": "a3ef6b1c88030fff43c5860bb56859fd6bf024fcfa34266a84922d07cee0ca4b",
+      "byte_range_inclusive": [
+        1269683536,
+        1269708111
+      ],
+      "shard_bytes": 5365306704,
+      "storage_dtype": "BF16",
+      "selected_shape": [
+        3,
+        4096
+      ]
+    },
+    {
+      "repo": "zai-org/GLM-5.3-Flash",
+      "revision": "46a050bec13002ad29ee795c16e61cf4fa3c4a9c",
+      "file": "model-00002-of-00062.safetensors",
+      "purpose": "header_length",
+      "bytes": 8,
+      "sha256": "005cf4fa3bfec7eb4c81719443e09a63c828cd45bde72d34317d018d83edbb19",
+      "byte_range_inclusive": [
+        0,
+        7
+      ],
+      "shard_bytes": 5320647824
+    },
+    {
+      "repo": "zai-org/GLM-5.3-Flash",
+      "revision": "46a050bec13002ad29ee795c16e61cf4fa3c4a9c",
+      "file": "model-00002-of-00062.safetensors",
+      "purpose": "safetensors_header",
+      "bytes": 160856,
+      "sha256": "4727368ca83ad19ddfea0bfcb0fbf4427087b5b0bf648968b863962454e85c15",
+      "byte_range_inclusive": [
+        8,
+        160863
+      ],
+      "shard_bytes": 5320647824
+    },
+    {
+      "repo": "zai-org/GLM-5.3-Flash",
+      "revision": "46a050bec13002ad29ee795c16e61cf4fa3c4a9c",
+      "file": "model-00002-of-00062.safetensors",
+      "purpose": "model.language_model.layers.0.hc_attn_fn",
+      "bytes": 786432,
+      "sha256": "ced298d9ac5f1d3ff25507129c35335cffb45fae14197df6ec2be4cf647b0301",
+      "byte_range_inclusive": [
+        52306576,
+        53093007
+      ],
+      "shard_bytes": 5320647824,
+      "storage_dtype": "BF16",
+      "selected_shape": [
+        24,
+        16384
+      ]
+    },
+    {
+      "repo": "zai-org/GLM-5.3-Flash",
+      "revision": "46a050bec13002ad29ee795c16e61cf4fa3c4a9c",
+      "file": "model-00002-of-00062.safetensors",
+      "purpose": "model.language_model.layers.0.hc_attn_base",
+      "bytes": 96,
+      "sha256": "a2b04183e857d67954da49658f141f9d7546487ce0da3a86ea10292398c157d8",
+      "byte_range_inclusive": [
+        1288416,
+        1288511
+      ],
+      "shard_bytes": 5320647824,
+      "storage_dtype": "F32",
+      "selected_shape": [
+        24
+      ]
+    },
+    {
+      "repo": "zai-org/GLM-5.3-Flash",
+      "revision": "46a050bec13002ad29ee795c16e61cf4fa3c4a9c",
+      "file": "model-00002-of-00062.safetensors",
+      "purpose": "model.language_model.layers.0.hc_attn_scale",
+      "bytes": 12,
+      "sha256": "d098b90c82c458eaac09c2bd3a167234056ba9c83f0fa219ecfa337dcd22c79d",
+      "byte_range_inclusive": [
+        1288512,
+        1288523
+      ],
+      "shard_bytes": 5320647824,
+      "storage_dtype": "F32",
+      "selected_shape": [
+        3
+      ]
+    },
+    {
+      "repo": "zai-org/GLM-5.3-Flash",
+      "revision": "46a050bec13002ad29ee795c16e61cf4fa3c4a9c",
+      "file": "model-00002-of-00062.safetensors",
+      "purpose": "model.language_model.layers.0.input_layernorm.weight",
+      "bytes": 8192,
+      "sha256": "4e86992f0994cbcd9db0d99b4da227d018b78f92fd50e7837bc9c2031b693bbc",
+      "byte_range_inclusive": [
+        53879440,
+        53887631
+      ],
+      "shard_bytes": 5320647824,
+      "storage_dtype": "BF16",
+      "selected_shape": [
+        4096
+      ]
+    },
+    {
+      "repo": "zai-org/GLM-5.3-Flash",
+      "revision": "46a050bec13002ad29ee795c16e61cf4fa3c4a9c",
+      "file": "model-00019-of-00062.safetensors",
+      "purpose": "header_length",
+      "bytes": 8,
+      "sha256": "2b1a03bba3ae2b06e0ac92147f70881c8cbef71a36a7e18d82e5129cb76c17e4",
+      "byte_range_inclusive": [
+        0,
+        7
+      ],
+      "shard_bytes": 5364342272
+    },
+    {
+      "repo": "zai-org/GLM-5.3-Flash",
+      "revision": "46a050bec13002ad29ee795c16e61cf4fa3c4a9c",
+      "file": "model-00019-of-00062.safetensors",
+      "purpose": "safetensors_header",
+      "bytes": 173728,
+      "sha256": "86437264ecac675e3adf3ffe50dd99e7fad2ea1f9fbb2cf2d3e34d85221ef54b",
+      "byte_range_inclusive": [
+        8,
+        173735
+      ],
+      "shard_bytes": 5364342272
+    },
+    {
+      "repo": "zai-org/GLM-5.3-Flash",
+      "revision": "46a050bec13002ad29ee795c16e61cf4fa3c4a9c",
+      "file": "model-00019-of-00062.safetensors",
+      "purpose": "model.language_model.layers.22.hc_attn_fn",
+      "bytes": 786432,
+      "sha256": "96ed4841fd9e23ac41a9010b766abba417931c0c049a37396ae821c27c2a7826",
+      "byte_range_inclusive": [
+        279264768,
+        280051199
+      ],
+      "shard_bytes": 5364342272,
+      "storage_dtype": "BF16",
+      "selected_shape": [
+        24,
+        16384
+      ]
+    },
+    {
+      "repo": "zai-org/GLM-5.3-Flash",
+      "revision": "46a050bec13002ad29ee795c16e61cf4fa3c4a9c",
+      "file": "model-00019-of-00062.safetensors",
+      "purpose": "model.language_model.layers.22.hc_attn_base",
+      "bytes": 96,
+      "sha256": "768daa995b1c72f47a9f8ca7dba7c848e7efb6e65cdedccc6b79a4ab8df440a8",
+      "byte_range_inclusive": [
+        1381416,
+        1381511
+      ],
+      "shard_bytes": 5364342272,
+      "storage_dtype": "F32",
+      "selected_shape": [
+        24
+      ]
+    },
+    {
+      "repo": "zai-org/GLM-5.3-Flash",
+      "revision": "46a050bec13002ad29ee795c16e61cf4fa3c4a9c",
+      "file": "model-00019-of-00062.safetensors",
+      "purpose": "model.language_model.layers.22.hc_attn_scale",
+      "bytes": 12,
+      "sha256": "e21e83304412f6ca3d86f4bd025e5e6cdb193af95c490e7abe007939a486833b",
+      "byte_range_inclusive": [
+        1381512,
+        1381523
+      ],
+      "shard_bytes": 5364342272,
+      "storage_dtype": "F32",
+      "selected_shape": [
+        3
+      ]
+    },
+    {
+      "repo": "zai-org/GLM-5.3-Flash",
+      "revision": "46a050bec13002ad29ee795c16e61cf4fa3c4a9c",
+      "file": "model-00019-of-00062.safetensors",
+      "purpose": "model.language_model.layers.22.input_layernorm.weight",
+      "bytes": 8192,
+      "sha256": "4ea6c8f47446819b9dfa175b17c4fd747b2578e098bc8e6cda0556223e69e16f",
+      "byte_range_inclusive": [
+        280837632,
+        280845823
+      ],
+      "shard_bytes": 5364342272,
+      "storage_dtype": "BF16",
+      "selected_shape": [
+        4096
+      ]
+    }
+  ]
+}

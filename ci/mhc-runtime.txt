@@ -1,0 +1,9 @@
+# CPU compatibility profile for the native DeepSeek-V4 and GLM-5.3-Flash
+# model classes. Install on top of the locked environment as documented in
+# docs/model-runtime-mhc.md.
+transformers==5.20.2
+huggingface-hub==1.33.0
+tokenizers==0.23.3
+safetensors==0.8.0
+peft==0.20.0
+kernels==0.17.2

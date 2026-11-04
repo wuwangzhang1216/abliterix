@@ -40,6 +40,7 @@ from ..types import ChatMessage, QuantMode, SteeringMode, VectorMethod, WeightNo
 from ..util import chunk_batches, flush_memory, print
 from .bnb_utils import is_bnb_int8_weight, validate_bnb_int8_weight
 from . import fp8_utils
+from .mhc import capture_mhc_reads, native_mhc_backbone
 from .quantization_validation import validate_quantization_state
 
 # transformers < 5.0 uses torch_dtype=, >= 5.0 uses dtype= in from_pretrained.
@@ -168,7 +169,9 @@ def resolve_model_class(
     return AutoModelForCausalLM
 
 
-def _validate_transformers_architecture(config: dict[str, Any]) -> None:
+def _validate_transformers_architecture(
+    config: dict[str, Any], runtime: AbliterixConfig | None = None
+) -> None:
     """Explain missing upstream registrations without changing dependencies."""
     from transformers.models.auto.configuration_auto import CONFIG_MAPPING
 
@@ -190,20 +193,28 @@ def _validate_transformers_architecture(config: dict[str, Any]) -> None:
             raise RuntimeError(
                 f"Installed Transformers {_tf.__version__} does not register "
                 f"the {model_type!r} architecture. Official model code is present "
-                "in Transformers 5.20.2; evaluate a compatible release in an "
-                "isolated environment rather than changing the shared lock. "
-                "This only addresses the upstream loader: multi-stream hidden "
-                "state extraction remains unsupported. See "
-                "docs/model-compatibility.md and issue #19."
+                "in Transformers 5.20.2. See docs/model-compatibility.md "
+                "for the native multi-stream runtime and validation scope."
             )
-        streams = cfg.get("hc_mult")
-        if isinstance(streams, int) and streams > 1:
-            raise RuntimeError(
-                f"The {model_type!r} architecture declares {streams} residual "
-                "streams. Multi-stream hidden-state extraction is unsupported; "
-                "upgrading Transformers alone does not validate this "
-                "representation. Stopping before model weights are loaded. "
-                "See docs/model-compatibility.md and issue #19."
+        if runtime is None:
+            continue
+        if model_type == "glm5_next" and runtime.model.text_only:
+            raise ValueError(
+                "GLM-5.3-Flash uses AutoModelForImageTextToText for text prompts too. "
+                "Set model.text_only=false to load its native generation head."
+            )
+        if (
+            runtime.model.backend != "hf"
+            or runtime.model.use_torch_compile
+            or runtime.steering.steering_mode
+            not in (SteeringMode.LORA, SteeringMode.DIRECT)
+            or runtime.steering.vector_method == VectorMethod.RDO
+            or runtime.steering.cliff_head_ablation
+        ):
+            raise ValueError(
+                "Native mHC reads support eager HF direct and LoRA weight edits. "
+                "Runtime block-output hooks, RDO and cliff-head ablation need "
+                "separate stream/head mappings. See docs/model-compatibility.md."
             )
 
 
@@ -226,6 +237,7 @@ def _register_mtp_layer_types_adapter(
     model_id: str,
     trust_remote_code: bool | None,
     revision: str | None = None,
+    runtime: AbliterixConfig | None = None,
 ) -> None:
     """Register models whose ``layer_types`` includes MTP head layers.
 
@@ -253,7 +265,7 @@ def _register_mtp_layer_types_adapter(
     # Reuse the metadata already fetched by this preflight, before tokenizer
     # or model loading. Unsupported native architectures need an actionable
     # error, not an implicit global Transformers upgrade.
-    _validate_transformers_architecture(cfg_dict)
+    _validate_transformers_architecture(cfg_dict, runtime)
     try:
         layer_types = cfg_dict.get("layer_types")
         n_hidden = cfg_dict.get("num_hidden_layers")
@@ -543,6 +555,7 @@ class SteeringEngine:
             model_id,
             config.model.trust_remote_code,
             config.model.revision,
+            runtime=config,
         )
 
         self.tokenizer = load_tokenizer(
@@ -803,6 +816,17 @@ class SteeringEngine:
 
         if self.model is None:
             raise RuntimeError("Failed to load model with all configured dtypes.")
+
+        if native_mhc_backbone(self.model) is not None:
+            # Check the actual native class too when remote metadata bypassed
+            # preflight, before installing adapters or compiling the model.
+            _validate_transformers_architecture(
+                {"model_type": self.model.config.model_type}, runtime=config
+            )
+            print(
+                "* Native mHC readouts: per-block attention inputs and final "
+                "normalized LM-head input"
+            )
 
         # bnb 4-bit: non-quantized tensors (embed/norm/lm_head) may still be
         # float16 after load (including dtype="auto" when the checkpoint is
@@ -2176,7 +2200,7 @@ class SteeringEngine:
         messages: list[ChatMessage],
         token_offset: int = -1,
     ) -> Tensor:
-        """Return per-layer residual vectors at a configurable token position.
+        """Return per-layer observable vectors at a configurable token position.
 
         Parameters
         ----------
@@ -2188,6 +2212,11 @@ class SteeringEngine:
             are encoded separately from refusal.
 
         Shape of the returned tensor: ``(batch, layers+1, hidden_dim)``.
+        Native mHC slots ``0..layers-1`` are each block's attention input
+        after learned stream routing and before RMSNorm. The last slot is
+        the final normalized LM-head input. Other models use their standard
+        hidden-state tuple. These are distinct representation conventions;
+        native mHC reads do not reconstruct the full residual streams.
         """
         inputs = self._tokenize(messages)
         self._reset_position_cache()
@@ -2207,28 +2236,27 @@ class SteeringEngine:
             )
             self._logits_to_keep_support = cache
 
-        forward_kwargs: dict[str, Any] = {"output_hidden_states": True}
+        forward_kwargs: dict[str, Any] = {}
         if cache[1]:
             forward_kwargs["logits_to_keep"] = 1
 
-        outputs = self.model(**inputs, **forward_kwargs)
-        hidden_states = outputs.hidden_states
-
-        def at_offset(hs: Tensor) -> Tensor:
-            if hs.ndim != 3:
-                raise RuntimeError(
-                    "Hidden-state extraction requires (batch, sequence, hidden) "
-                    f"tensors; received shape {tuple(hs.shape)}. Multi-stream "
-                    "hidden states are unsupported: averaging streams is not "
-                    "a validated representation of each layer. See "
-                    "docs/model-compatibility.md and issue #19."
-                )
-            return hs[:, token_offset]
-
-        residuals = torch.stack(
-            [at_offset(hs) for hs in hidden_states],
-            dim=1,
-        ).to(torch.float32)
+        backbone = native_mhc_backbone(self.model)
+        if backbone is not None:
+            residuals = capture_mhc_reads(
+                self.model, backbone, inputs, token_offset, forward_kwargs
+            )
+        else:
+            outputs = self.model(**inputs, **forward_kwargs, output_hidden_states=True)
+            slices = []
+            for hs in outputs.hidden_states:
+                if hs.ndim != 3:
+                    raise RuntimeError(
+                        "Hidden-state extraction requires (batch, sequence, hidden) "
+                        f"tensors; received shape {tuple(hs.shape)} from an unsupported "
+                        "model implementation. See docs/model-compatibility.md."
+                    )
+                slices.append(hs[:, token_offset])
+            residuals = torch.stack(slices, dim=1).to(torch.float32)
 
         q = self.config.steering.outlier_quantile
         if 0 <= q < 1:

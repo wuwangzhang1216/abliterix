@@ -26,6 +26,9 @@ jobs:
 
   test:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
     env:
       UV_PYTHON: ${{ matrix.python-version }}
     strategy:
@@ -38,11 +41,12 @@ jobs:
       - run: uv python install ${{ matrix.python-version }}
       - run: uv sync --group dev --no-extra vllm --python ${{ matrix.python-version }}
       - run: uv run pytest tests/ -x --cov=abliterix --cov-report=xml
-      - uses: codecov/codecov-action@v5
+      - uses: codecov/codecov-action@v7
         if: matrix.python-version == '3.13'
         with:
           files: coverage.xml
-          fail_ci_if_error: false
+          use_oidc: true
+          fail_ci_if_error: true
 
   ui:
     runs-on: ubuntu-latest
@@ -52,12 +56,89 @@ jobs:
     strategy:
       matrix:
         gradio: ["5.50.0", "6.19.0"]
-    name: ui (Gradio ${{ matrix.gradio }})
+        plotly: ["6.7.0", "7.1.0"]
+    name: ui (Gradio ${{ matrix.gradio }}, Plotly ${{ matrix.plotly }})
     steps:
       - uses: actions/checkout@v7
       - uses: astral-sh/setup-uv@v7
       - run: uv sync --locked --group dev --extra ui --no-extra vllm
-      - run: uv run --locked --extra ui --with "gradio==${{ matrix.gradio }}" --with "huggingface-hub~=1.6" pytest tests/test_webui.py -v
+      - run: uv pip install --python .venv/bin/python --exclude-newer 2026-11-03T23:59:59Z "gradio==${{ matrix.gradio }}" "plotly==${{ matrix.plotly }}" "huggingface-hub~=1.6" -e '.[ui]'
+      - run: uv pip check --python .venv/bin/python
+      - name: Require candidate UI versions
+        run: |
+          .venv/bin/python - <<'PY'
+          from importlib.metadata import version
+          assert version("gradio") == "${{ matrix.gradio }}"
+          assert version("plotly") == "${{ matrix.plotly }}"
+          PY
+      - run: .venv/bin/python -m pytest tests/test_webui.py tests/test_plotly_compatibility.py -v
+
+  native-mhc:
+    name: Native model runtime (Transformers 5.20.2, CPU)
+    runs-on: ubuntu-latest
+    env:
+      UV_PYTHON: "3.12"
+      UV_PROJECT_ENVIRONMENT: venv/mhc
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v7
+      - run: uv python install 3.12
+      - run: uv sync --locked --group dev --no-extra vllm
+      - run: uv pip install --python venv/mhc/bin/python --exclude-newer 2026-10-20T00:00:00Z -r ci/mhc-runtime.txt -e .
+      - run: uv pip check --python venv/mhc/bin/python
+      - name: Verify the entry point and native classes
+        run: |
+          venv/mhc/bin/abliterix --help > /dev/null
+          venv/mhc/bin/python -c 'from transformers import DeepseekV4ForCausalLM, Glm5NextForConditionalGeneration, Kimi_K25ForConditionalGeneration'
+      - name: Run the full suite and require native integration coverage
+        env:
+          HF_HUB_OFFLINE: "1"
+        run: |
+          venv/mhc/bin/python -m pytest tests/ -q --junitxml="$RUNNER_TEMP/mhc-tests.xml"
+          venv/mhc/bin/python - "$RUNNER_TEMP/mhc-tests.xml" <<'PY'
+          import sys
+          import xml.etree.ElementTree as ET
+
+          cases = [
+              test for test in ET.parse(sys.argv[1]).iter("testcase")
+              if {"test_mhc_integration", "test_mhc_components", "test_kimi_compatibility", "test_qwen35_compatibility"}.intersection(
+                  test.get("classname", "").split(".")
+              )
+              and not test.get("name", "").startswith("test_mhc_cuda_")
+          ]
+          if len(cases) < 15 or any(test.find("skipped") is not None for test in cases):
+              raise SystemExit("Native model integration cases must execute on this profile")
+          PY
+
+  hub2:
+    name: Hub 2.4 / Datasets 5.1 compatibility
+    runs-on: ubuntu-latest
+    env:
+      UV_PYTHON: "3.12"
+      UV_PROJECT_ENVIRONMENT: venv/hub2
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v7
+      - run: uv python install 3.12
+      - run: uv sync --locked --group dev --no-extra vllm
+      - run: uv pip install --python venv/hub2/bin/python --exclude-newer 2026-11-03T23:59:59Z -r ci/hub2-runtime.txt -e .
+      - run: uv pip check --python venv/hub2/bin/python
+      - name: Require the candidate runtime
+        run: |
+          venv/hub2/bin/abliterix --help > /dev/null
+          venv/hub2/bin/python - <<'PY'
+          from importlib.metadata import version
+          for package, expected in {
+              "huggingface-hub": "2.4.0",
+              "datasets": "5.1.0",
+              "transformers": "5.20.2",
+          }.items():
+              assert version(package) == expected, (package, version(package))
+          PY
+      - name: Run the full suite with the Hub 2 HTTP client
+        env:
+          HF_HUB_OFFLINE: "1"
+        run: venv/hub2/bin/python -m pytest tests/ -q
 
   build:
     runs-on: ubuntu-latest
@@ -67,6 +148,44 @@ jobs:
       - run: uv build
       - run: test -n "$(find dist -maxdepth 1 -name '*.whl' -print -quit)"
       - run: test -n "$(find dist -maxdepth 1 -name '*.tar.gz' -print -quit)"
+
+  build-backend:
+    name: Build backend 0.13.7 / installed wheel
+    runs-on: ubuntu-latest
+    env:
+      UV_PYTHON: "3.12"
+      UV_PROJECT_ENVIRONMENT: venv/package
+      PYTHONUTF8: "1"
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v7
+      - run: uv sync --locked --group dev --no-extra vllm
+      - run: uv pip install --python venv/package/bin/python --exclude-newer 2026-11-03T23:59:59Z "uv_build==0.13.7" "build==1.3.0"
+      - name: Build an sdist, rebuild its wheel, and exercise the installed CLI
+        run: |
+          export PATH="$GITHUB_WORKSPACE/venv/package/bin:$PATH"
+          python -c 'from importlib.metadata import version; assert version("uv_build") == "0.13.7"'
+          # The build frontend uses the installed backend, not uv's bundled one.
+          # Without --wheel/--sdist, it builds the wheel from the generated sdist.
+          python -m build --no-isolation --outdir "$RUNNER_TEMP/package-dist"
+          python - "$RUNNER_TEMP/package-dist" <<'PY'
+          from pathlib import Path
+          import sys
+          import zipfile
+
+          directory = Path(sys.argv[1])
+          wheels = list(directory.glob("*.whl"))
+          assert len(wheels) == 1
+          assert len(list(directory.glob("*.tar.gz"))) == 1
+          with zipfile.ZipFile(wheels[0]) as archive:
+              metadata = next(n for n in archive.namelist() if n.endswith(".dist-info/WHEEL"))
+              assert "Generator: uv 0.13.7" in archive.read(metadata).decode()
+          PY
+          uv pip install --python venv/package/bin/python --no-deps --reinstall-package abliterix "$RUNNER_TEMP/package-dist/"*.whl
+          uv pip check --python venv/package/bin/python
+          cd "$RUNNER_TEMP"
+          python -c 'from pathlib import Path; import abliterix; assert "site-packages" in Path(abliterix.__file__).parts'
+          abliterix --help > /dev/null
 
   reproducibility-e2e:
     runs-on: ubuntu-latest
