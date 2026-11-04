@@ -399,12 +399,16 @@ def _build_pareto_plot() -> object | None:
     pairs = sorted(zip(kls, refs, labels), key=lambda t: (t[1], t[0]))
     pareto_kl, pareto_ref, pareto_lbl = [], [], []
     best_kl = float("inf")
+    best_ref = float("inf")
     for k, r, lbl in pairs:
-        if k <= best_kl:
+        # Equal KL with more refusals is dominated; exact duplicate optima
+        # still represent selectable trials and should remain visible.
+        if k < best_kl or (k == best_kl and r == best_ref):
             pareto_kl.append(k)
             pareto_ref.append(r)
             pareto_lbl.append(lbl)
             best_kl = k
+            best_ref = r
 
     if pareto_kl:
         fig.add_trace(

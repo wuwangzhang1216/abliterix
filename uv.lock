@@ -86,7 +86,7 @@ requires-dist = [
     { name = "optuna", specifier = "~=4.5" },
     { name = "pacmap", marker = "extra == 'research'", specifier = "~=0.8" },
     { name = "peft", specifier = "~=0.18" },
-    { name = "plotly", marker = "extra == 'ui'", specifier = "~=6.1" },
+    { name = "plotly", marker = "extra == 'ui'", specifier = ">=6.1,<8.0" },
     { name = "psutil", specifier = "~=7.1" },
     { name = "pydantic-settings", specifier = "~=2.10" },
     { name = "questionary", specifier = "~=2.1" },
