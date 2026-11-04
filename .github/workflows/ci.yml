@@ -60,7 +60,7 @@ jobs:
       - run: uv run --locked --extra ui --with "gradio==${{ matrix.gradio }}" --with "huggingface-hub~=1.6" pytest tests/test_webui.py -v
 
   native-mhc:
-    name: Native mHC runtime (Transformers 5.20.2, CPU)
+    name: Native model runtime (Transformers 5.20.2, CPU)
     runs-on: ubuntu-latest
     env:
       UV_PYTHON: "3.12"
@@ -75,7 +75,7 @@ jobs:
       - name: Verify the entry point and native classes
         run: |
           venv/mhc/bin/abliterix --help > /dev/null
-          venv/mhc/bin/python -c 'from transformers import DeepseekV4ForCausalLM, Glm5NextForConditionalGeneration'
+          venv/mhc/bin/python -c 'from transformers import DeepseekV4ForCausalLM, Glm5NextForConditionalGeneration, Kimi_K25ForConditionalGeneration'
       - name: Run the full suite and require native integration coverage
         env:
           HF_HUB_OFFLINE: "1"
@@ -87,13 +87,13 @@ jobs:
 
           cases = [
               test for test in ET.parse(sys.argv[1]).iter("testcase")
-              if {"test_mhc_integration", "test_mhc_components"}.intersection(
+              if {"test_mhc_integration", "test_mhc_components", "test_kimi_compatibility"}.intersection(
                   test.get("classname", "").split(".")
               )
               and not test.get("name", "").startswith("test_mhc_cuda_")
           ]
-          if len(cases) < 10 or any(test.find("skipped") is not None for test in cases):
-              raise SystemExit("Native mHC integration cases must execute on this profile")
+          if len(cases) < 12 or any(test.find("skipped") is not None for test in cases):
+              raise SystemExit("Native model integration cases must execute on this profile")
           PY
 
   build:

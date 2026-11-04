@@ -1,5 +1,7 @@
 # Native mHC runtime profile
 
+This profile also runs the [native Kimi integration tests](kimi-compatibility.md).
+
 Use this CPU profile to run Abliterix's integration tests for the native DeepSeek-V4 and GLM-5.3-Flash classes. Start from the project's locked environment in a separate directory and install the six versions in [the profile](../ci/mhc-runtime.txt). Transformers 5.20.2 requires Hub 1.31 or later. The profile uses Hub 1.33.0, which also satisfies the project's `huggingface-hub~=1.6` requirement. [Transformers package requirements](https://pypi.org/pypi/transformers/5.20.2/json)
 
 On Linux, run these commands from the repository root with Python 3.12 and uv installed.
