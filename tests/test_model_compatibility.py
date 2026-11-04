@@ -52,20 +52,37 @@ def test_architecture_check_accepts_null_auto_map(monkeypatch):
     )
 
 
-def test_known_multistream_architecture_stops_before_load(monkeypatch):
+def test_registered_native_multistream_architecture_passes_preflight(monkeypatch):
     monkeypatch.setattr(configuration_auto, "CONFIG_MAPPING", {"deepseek_v4": object()})
+    engine_module._validate_transformers_architecture(
+        {"model_type": "deepseek_v4", "hc_mult": 4}
+    )
+
+
+@pytest.mark.parametrize(
+    "options, error",
+    [
+        ({"model": {"text_only": True}}, "text_only=false"),
+        ({"model": {"use_torch_compile": True}}, "eager HF"),
+        ({"steering": {"steering_mode": "angular"}}, "block-output hooks"),
+    ],
+)
+def test_multistream_unsupported_execution_fails_before_weights(
+    monkeypatch, options, error
+):
+    monkeypatch.setattr(configuration_auto, "CONFIG_MAPPING", {"glm5_next": object()})
     monkeypatch.setattr(
         PretrainedConfig,
         "get_config_dict",
-        lambda *_args, **_kwargs: ({"model_type": "deepseek_v4", "hc_mult": 4}, {}),
+        lambda *_args, **_kwargs: ({"model_type": "glm5_next"}, {}),
     )
     monkeypatch.setattr(
         engine_module,
         "load_tokenizer",
         lambda *_args, **_kwargs: pytest.fail("Tokenizer loading must not start"),
     )
-    with pytest.raises(RuntimeError, match="4 residual streams.*unsupported"):
-        SteeringEngine(AbliterixConfig())
+    with pytest.raises(ValueError, match=error):
+        SteeringEngine(AbliterixConfig(**options))
 
 
 def test_architecture_guard_does_not_guess_unknown_remote_model_semantics(monkeypatch):
@@ -120,12 +137,8 @@ def test_hidden_extraction_rejects_unsupported_shapes(shape):
 
 
 @pytest.mark.parametrize("family", ["deepseek_v4", "glm5_next"])
-def test_official_tiny_multistream_model_fails_with_explanatory_error(family):
-    """Newer Transformers: run real random CPU models, with no Hub downloads.
-
-    This checks the unsupported boundary, not large-checkpoint quality or
-    the correctness of any representation pooling or model modification.
-    """
+def test_official_mhc_reads_release_hooks_on_failure_and_recover(family):
+    """An invalid token offset must not leave observers on a long-lived model."""
     if family == "deepseek_v4":
         if not hasattr(transformers, "DeepseekV4Config"):
             pytest.skip("requires upstream DeepSeek-V4 model code")
@@ -194,5 +207,15 @@ def test_official_tiny_multistream_model_fails_with_explanatory_error(family):
     assert values.shape == (1, 3, 32 if family == "deepseek_v4" else 16)
     assert torch.isfinite(values).all()
     assert any(hs.ndim == 4 and hs.shape[-2:] == (4, 16) for hs in output.hidden_states)
-    with torch.inference_mode(), pytest.raises(RuntimeError, match="Multi-stream"):
-        _extraction_engine(model).extract_hidden_states([])
+    engine = _extraction_engine(model)
+    backbone = engine_module.native_mhc_backbone(model)
+    sites = [layer.input_layernorm for layer in backbone.layers]
+    initial = [len(site._forward_pre_hooks) for site in sites]
+    final_hooks = len(backbone.norm._forward_hooks)
+    with pytest.raises(IndexError):
+        engine.extract_hidden_states([], token_offset=3)
+    assert [len(site._forward_pre_hooks) for site in sites] == initial
+    assert len(backbone.norm._forward_hooks) == final_hooks
+    reads = engine.extract_hidden_states([])
+    assert reads.shape == (1, 3, 16)
+    torch.testing.assert_close(reads[:, -1], output.hidden_states[-1][:, -1])

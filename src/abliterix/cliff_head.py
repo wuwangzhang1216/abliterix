@@ -26,9 +26,14 @@ columns measures how much that head's output contributes to the refusal
 axis. The top fraction (default 3 %) is ablated by scaling the
 corresponding o_proj columns toward zero.
 
-This is a *static* alignment heuristic, not the activation-patching probe
-the paper uses; we trade a small loss in localisation precision for ~10 ⁴×
-speedup, which is acceptable for an automated abliteration sweep.
+This is a *static* alignment heuristic. It does not perform activation
+interchange or a gate-to-amplifier knockout experiment, so its scores do not
+establish causal gate identity. Its localisation accuracy and speed relative
+to activation-based methods have not been measured here.
+
+Only resident, ordinary floating-point weight tensors are supported. Packed,
+quantized, and offloaded projections require a separate implementation that
+preserves their storage and reload contracts.
 
 Reversibility
 -------------
@@ -84,6 +89,10 @@ def _get_head_dim(engine, layer_idx: int | None = None) -> tuple[int, int]:
             "needs head-level addressing. Disable cliff_head_ablation for this "
             "architecture."
         )
+    if not isinstance(num_heads, int) or num_heads <= 0:
+        raise RuntimeError(
+            "Cliff-head ablation requires a positive attention head count."
+        )
 
     head_dim = getattr(text_cfg, "head_dim", None)
     if head_dim is None:
@@ -94,7 +103,48 @@ def _get_head_dim(engine, layer_idx: int | None = None) -> tuple[int, int]:
                 "set on the model config."
             )
         head_dim = hidden // num_heads
-    return int(num_heads), int(head_dim)
+    if not isinstance(head_dim, int) or head_dim <= 0:
+        raise RuntimeError("Cliff-head ablation requires a positive head dimension.")
+    return num_heads, head_dim
+
+
+def _resident_dense_weight(module, layer_idx: int) -> Tensor:
+    """Reject unsupported storage before scoring or editing its raw values."""
+    base = module.base_layer if hasattr(module, "base_layer") else module
+    weight = getattr(base, "weight", None)
+    message = (
+        f"Cliff-head ablation requires a resident dense floating-point o_proj "
+        f"weight at layer {layer_idx}. Packed, quantized and offloaded weights "
+        "are unsupported; disable cliff_head_ablation or load an unquantized "
+        "model without offload."
+    )
+    # A lazy bitsandbytes parameter can still have floating storage before its
+    # first forward. Accept only ordinary tensors, not parameter/tensor classes
+    # whose representation or writes have additional quantization semantics.
+    if (
+        not isinstance(weight, Tensor)
+        or type(weight) not in (Tensor, torch.nn.Parameter)
+        or weight.is_meta
+        or weight.layout != torch.strided
+        or weight.dtype
+        not in (torch.float16, torch.bfloat16, torch.float32, torch.float64)
+        or weight.ndim != 2
+    ):
+        raise RuntimeError(message)
+
+    # Accelerate's offload hook can replace a resident weight on the next
+    # forward, discarding an in-place edit. Sequential hooks wrap this hook.
+    pending = [getattr(owner, "_hf_hook", None) for owner in (module, base)]
+    visited: set[int] = set()
+    while pending:
+        hook = pending.pop()
+        if hook is None or id(hook) in visited:
+            continue
+        visited.add(id(hook))
+        if getattr(hook, "offload", False):
+            raise RuntimeError(message)
+        pending.extend(getattr(hook, "hooks", ()))
+    return weight
 
 
 def _refusal_vector_at_layer(refusal_vector: Tensor, layer_idx: int) -> Tensor:
@@ -157,8 +207,7 @@ def identify_safety_heads(
             continue
         o_proj = o_proj_list[0]
 
-        base = o_proj.base_layer if hasattr(o_proj, "base_layer") else o_proj
-        W = base.weight  # (hidden_out, num_heads * head_dim)
+        W = _resident_dense_weight(o_proj, layer_idx)
 
         v_layer = _refusal_vector_at_layer(refusal_vector, layer_idx)
         v = v_layer.to(W.device).to(torch.float32)
@@ -226,47 +275,60 @@ def apply_cliff_head_ablation(
     Caches original weight slices in ``engine._cliff_head_originals`` so
     :func:`restore_cliff_head_ablation` can roll back.
     """
-    if strength <= 0.0:
+    if not 0.0 <= strength <= 1.0:
+        raise ValueError("Cliff-head strength must be finite and in [0, 1].")
+    if strength == 0.0:
         return 0
-
-    if not hasattr(engine, "_cliff_head_originals"):
-        engine._cliff_head_originals = {}
 
     # Group by layer so we touch each o_proj module once per layer.
     by_layer: dict[int, list[int]] = defaultdict(list)
+    n_layers = engine.get_n_layers()
     for entry in head_list:
+        if not isinstance(entry.layer, int) or not 0 <= entry.layer < n_layers:
+            raise ValueError(f"Invalid cliff-head layer index: {entry.layer}")
         by_layer[entry.layer].append(entry.head)
 
-    n_modified = 0
+    # Validate every target before changing either the weights or restore cache.
+    # A later unsupported layer must not leave earlier layers partly modified.
+    plan: dict[tuple[int, int], tuple[Tensor, int, int, int]] = {}
     for layer_idx, heads in by_layer.items():
         modules = engine.steerable_modules(layer_idx)
         o_proj_list = modules.get("attn.o_proj", [])
         if not o_proj_list:
-            continue
+            raise RuntimeError(f"No attention output projection at layer {layer_idx}.")
         num_heads, head_dim = _get_head_dim(engine, layer_idx)
+        for head in heads:
+            if not isinstance(head, int) or not 0 <= head < num_heads:
+                raise ValueError(
+                    f"Invalid cliff-head index {head} at layer {layer_idx}."
+                )
         for o_proj in o_proj_list:
-            base = o_proj.base_layer if hasattr(o_proj, "base_layer") else o_proj
-            weight = base.weight
+            weight = _resident_dense_weight(o_proj, layer_idx)
             in_features = weight.shape[1]
             if in_features != num_heads * head_dim:
-                continue
+                raise RuntimeError(
+                    f"Cliff-head projection shape at layer {layer_idx} does not "
+                    "match its attention head count and dimension."
+                )
 
-            data = weight.data
             for head in heads:
                 lo = head * head_dim
                 hi = lo + head_dim
-                # Cache the slice keyed by (weight, head) so restore is O(1).
-                key = (id(weight), head)
-                if key not in engine._cliff_head_originals:
-                    engine._cliff_head_originals[key] = (
-                        weight,
-                        head,
-                        data[:, lo:hi].clone(),
-                    )
-                data[:, lo:hi] *= 1.0 - strength
-                n_modified += 1
+                plan[(id(weight), head)] = (weight, head, lo, hi)
 
-    return n_modified
+    if not plan:
+        return 0
+    cache = getattr(engine, "_cliff_head_originals", {})
+    originals = {
+        key: (weight, head, weight.detach()[:, lo:hi].clone())
+        for key, (weight, head, lo, hi) in plan.items()
+        if key not in cache
+    }
+    cache.update(originals)
+    engine._cliff_head_originals = cache
+    for weight, _head, lo, hi in plan.values():
+        weight.data[:, lo:hi] *= 1.0 - strength
+    return len(plan)
 
 
 def restore_cliff_head_ablation(engine) -> int:
