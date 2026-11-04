@@ -140,6 +140,24 @@ jobs:
           HF_HUB_OFFLINE: "1"
         run: venv/hub2/bin/python -m pytest tests/ -q
 
+  optuna5:
+    name: Optuna 5.0 compatibility
+    runs-on: ubuntu-latest
+    env:
+      UV_PYTHON: "3.12"
+      UV_PROJECT_ENVIRONMENT: venv/optuna5
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v7
+      - run: uv sync --locked --group dev --no-extra vllm
+      - run: uv pip install --python venv/optuna5/bin/python --exclude-newer 2026-11-03T23:59:59Z "optuna==5.0.0" -e .
+      - run: uv pip check --python venv/optuna5/bin/python
+      - run: venv/optuna5/bin/python -c 'from importlib.metadata import version; assert version("optuna") == "5.0.0"'
+      - name: Run the full suite including interrupted journal replay
+        env:
+          HF_HUB_OFFLINE: "1"
+        run: venv/optuna5/bin/python -m pytest tests/ -q
+
   build:
     runs-on: ubuntu-latest
     steps:

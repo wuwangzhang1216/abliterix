@@ -54,3 +54,20 @@ CLI outside the checkout. This verifies both package contents and entry points.
 The existing `uv build` job remains in place, but it may use a
 [bundled backend](https://docs.astral.sh/uv/concepts/build-backend/#bundled-build-backend).
 The additional job explicitly exercises the newly allowed backend version.
+
+## Optuna 5
+
+The default lock continues to test Optuna 4.6. A separate job installs and asserts
+Optuna 5.0, checks dependency consistency, and runs the full suite, including
+interrupted journal recovery and selected-trial replay.
+
+[Optuna 5](https://github.com/optuna/optuna/releases/tag/v5.0.0) changed TPE's
+`constant_liar` default to `True`. Abliterix explicitly retains `False` so that
+unfinished trials left in a journal do not repel later proposals in a sequential
+search. The regression reopens a real journal and compares the next proposal
+with identical completed/pruned history that has no unfinished trial.
+
+This preserves that recovery behavior, not bitwise search equivalence between
+Optuna majors. Keep the recorded dependency versions when reproducing a run.
+The custom completed-trial `gamma` remains supported in Optuna 5 but is deprecated
+for removal in 6; the dependency range continues to exclude Optuna 6.
