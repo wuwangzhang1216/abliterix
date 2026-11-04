@@ -611,6 +611,9 @@ def run_search(
         n_startup_trials=opt.num_warmup_trials,
         n_ei_candidates=128,
         multivariate=True,
+        # Keep Optuna 4's sequential-search behavior: unfinished journal trials
+        # must not repel new proposals when resuming (Optuna 5 defaults to True).
+        constant_liar=False,
         gamma=_completed_trial_gamma,
     )
     if _sampler_seed is not None:

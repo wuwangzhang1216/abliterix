@@ -1,0 +1,10 @@
+# Hub 2 requires compatible Transformers and Datasets releases. The locked
+# default and Gradio UI environments continue to exercise Hub 1.x.
+transformers==5.20.2
+huggingface-hub==2.4.0
+tokenizers==0.23.3
+safetensors==0.8.0
+peft==0.20.0
+kernels==0.17.2
+datasets==5.1.0
+pyarrow==24.0.0
