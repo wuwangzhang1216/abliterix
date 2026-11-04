@@ -99,6 +99,25 @@ def is_model_supported(config: AbliterixConfig) -> bool:
         return False
 
 
+def _load_hidden_states_file(path: str) -> Tensor:
+    """Wait for the connector's write to finish before reading its tensor."""
+    from vllm.distributed.kv_transfer.kv_connector.v1 import (
+        example_hidden_states_connector,
+    )
+
+    # vLLM 0.22+ can return from generate() before its asynchronous disk write
+    # completes. Its loader waits on the companion lock file; opening the
+    # safetensors file directly can see a missing or partially written file.
+    loader = getattr(example_hidden_states_connector, "load_hidden_states", None)
+    if loader is not None:
+        return loader(path)["hidden_states"]
+
+    # Earlier connectors write synchronously and do not expose the helper.
+    # Import and loader failures must propagate rather than bypassing the lock.
+    with safe_open(path, "pt") as f:
+        return f.get_tensor("hidden_states")
+
+
 def extract_hidden_states_vllm(
     config: AbliterixConfig,
     prompt_sets: dict[str, list[ChatMessage]],
@@ -289,8 +308,7 @@ def extract_hidden_states_vllm(
                     f"kv_transfer_params={out.kv_transfer_params}"
                 )
 
-            with safe_open(hs_path, "pt") as f:
-                hs = f.get_tensor("hidden_states")
+            hs = _load_hidden_states_file(hs_path)
 
             # vLLM's ExampleHiddenStatesConnector stores hidden states as
             # [prompt_len, num_layers, hidden_dim] — NOT [num_layers, prompt_len,
