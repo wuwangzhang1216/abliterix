@@ -87,12 +87,12 @@ jobs:
 
           cases = [
               test for test in ET.parse(sys.argv[1]).iter("testcase")
-              if {"test_mhc_integration", "test_mhc_components", "test_kimi_compatibility"}.intersection(
+              if {"test_mhc_integration", "test_mhc_components", "test_kimi_compatibility", "test_qwen35_compatibility"}.intersection(
                   test.get("classname", "").split(".")
               )
               and not test.get("name", "").startswith("test_mhc_cuda_")
           ]
-          if len(cases) < 12 or any(test.find("skipped") is not None for test in cases):
+          if len(cases) < 15 or any(test.find("skipped") is not None for test in cases):
               raise SystemExit("Native model integration cases must execute on this profile")
           PY
 

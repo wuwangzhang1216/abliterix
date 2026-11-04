@@ -150,3 +150,20 @@ These checks establish observable correctness and integration behavior at small
 scale. Full 284B/320B checkpoint loading, capability retention, and quality after
 editing still require direct measurement. Issue #19 remains open for those
 acceptance results.
+
+## Qwen3.5 artifact validation
+
+`tests/test_qwen35_compatibility.py` loads a tiny local native Qwen3.5 multimodal
+checkpoint through the normal engine. Three cases cover live adapters in both
+linear and full attention, decoder-only target paths, native hidden states and
+generation parity, baseline restoration, selected-trial replay, and adapter and
+merged-model reload. They pass with Transformers 5.7.0 and 5.20.2. The newer
+runtime CI requires these cases to execute as well.
+
+The fixtures use random FP32 CPU weights, neutral strings, and synthetic test
+directions. They verify model connectivity and artifact contracts, without
+reproducing the 9B run in [issue #110](https://github.com/wuwangzhang1216/abliterix/issues/110).
+That report still needs the selected export's pinned checkpoint, manifest,
+weight hashes, and matched in-memory/reloaded evaluation to distinguish a
+search-quality result from an artifact problem. A successful tiny-model test
+does not establish a behavioral improvement or capability retention at 9B.
