@@ -83,7 +83,7 @@ requires-dist = [
     { name = "matplotlib", marker = "extra == 'research'", specifier = "~=3.10" },
     { name = "numpy", marker = "extra == 'research'", specifier = "~=2.2" },
     { name = "openai", specifier = ">=2,<3" },
-    { name = "optuna", specifier = "~=4.5" },
+    { name = "optuna", specifier = ">=4.5,<6.0" },
     { name = "pacmap", marker = "extra == 'research'", specifier = "~=0.8" },
     { name = "peft", specifier = "~=0.18" },
     { name = "plotly", marker = "extra == 'ui'", specifier = ">=6.1,<8.0" },

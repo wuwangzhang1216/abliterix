@@ -147,3 +147,39 @@ def test_enough_completed_trials_preserve_seeded_default_tpe_sampling(completed)
 
     assert actual.trials[-1].state == TrialState.COMPLETE
     assert actual.trials[-1].params == expected.params
+
+
+def test_resume_unfinished_trial_does_not_bias_next_proposal(tmp_path):
+    """An interrupted journal entry must not repel sequential TPE proposals."""
+    clean_storage = InMemoryStorage()
+    clean = optuna.create_study(
+        study_name="abliterix",
+        directions=["minimize", "minimize"],
+        storage=clean_storage,
+    )
+    _add_startup_history(clean, completed=12)
+    expected = _run(_config(13), clean_storage).trials[-1]
+
+    journal_path = str(tmp_path / "unfinished.log")
+    interrupted = optuna.create_study(
+        study_name="abliterix",
+        directions=["minimize", "minimize"],
+        storage=_journal_storage(journal_path),
+    )
+    interrupted.add_trials(clean.trials[:-1])
+    interrupted.add_trial(
+        create_trial(
+            state=TrialState.RUNNING,
+            params=expected.params,
+            distributions=expected.distributions,
+            user_attrs={"interrupted": True},
+        )
+    )
+
+    resumed = _run(_config(13), _journal_storage(journal_path))
+
+    assert len(resumed.trials) == 62
+    assert resumed.trials[60].state == TrialState.RUNNING
+    assert resumed.trials[60].user_attrs == {"interrupted": True}
+    assert resumed.trials[-1].state == TrialState.COMPLETE
+    assert resumed.trials[-1].params == expected.params
