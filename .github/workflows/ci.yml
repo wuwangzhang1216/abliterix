@@ -56,12 +56,22 @@ jobs:
     strategy:
       matrix:
         gradio: ["5.50.0", "6.19.0"]
-    name: ui (Gradio ${{ matrix.gradio }})
+        plotly: ["6.7.0", "7.1.0"]
+    name: ui (Gradio ${{ matrix.gradio }}, Plotly ${{ matrix.plotly }})
     steps:
       - uses: actions/checkout@v7
       - uses: astral-sh/setup-uv@v7
       - run: uv sync --locked --group dev --extra ui --no-extra vllm
-      - run: uv run --locked --extra ui --with "gradio==${{ matrix.gradio }}" --with "huggingface-hub~=1.6" pytest tests/test_webui.py -v
+      - run: uv pip install --python .venv/bin/python --exclude-newer 2026-11-03T23:59:59Z "gradio==${{ matrix.gradio }}" "plotly==${{ matrix.plotly }}" "huggingface-hub~=1.6" -e '.[ui]'
+      - run: uv pip check --python .venv/bin/python
+      - name: Require candidate UI versions
+        run: |
+          .venv/bin/python - <<'PY'
+          from importlib.metadata import version
+          assert version("gradio") == "${{ matrix.gradio }}"
+          assert version("plotly") == "${{ matrix.plotly }}"
+          PY
+      - run: .venv/bin/python -m pytest tests/test_webui.py tests/test_plotly_compatibility.py -v
 
   native-mhc:
     name: Native model runtime (Transformers 5.20.2, CPU)

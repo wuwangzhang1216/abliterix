@@ -28,3 +28,17 @@ The locked Transformers 5.7 and Datasets 4.4 releases require Hub 1.x; Gradio 6.
 also requires Hub below 2. The UI job therefore continues to validate Hub 1.x.
 The wider project range allows each combination's dependency constraints to
 select a compatible version; it does not force Hub 2 into the UI environment.
+
+## Plotly 7
+
+The UI matrix tests Gradio 5.50/6.19 against both Plotly 6.7 and 7.1. Each job
+asserts the installed versions and passes dashboard figures through Gradio's
+actual JSON serialization, including empty charts, dominated points, tied
+objectives, and duplicate optimal trials. This also guards the Pareto selection
+rule: equal KL with more refusals is dominated, while identical objective pairs
+remain selectable.
+
+[Plotly 7's removed APIs](https://github.com/plotly/plotly.py/releases/tag/v7.0.0)
+include legacy plotting and export interfaces; the dashboard uses `graph_objects`
+scatter traces. These tests cover its serialized chart data and Gradio callbacks;
+they do not assert pixel-identical browser rendering across Plotly majors.
