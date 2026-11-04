@@ -2,6 +2,9 @@ non_interactive = true
 
 # DeepSeek-V4-Flash (284B / 13B active, 256 routed experts top-6, 43 layers)
 # HF + EGA recipe — modeled after configs/minimax_m2.7_h200_hf.toml.
+# Native readout runtime and current acceptance scope:
+# docs/model-runtime-mhc.md and docs/model-compatibility.md (issue #19).
+# Small-model tests do not certify this full-checkpoint, multi-GPU recipe.
 #
 # IMPORTANT: model_id MUST point at a pre-dequanted BF16 directory:
 #
