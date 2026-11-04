@@ -42,3 +42,15 @@ remain selectable.
 include legacy plotting and export interfaces; the dashboard uses `graph_objects`
 scatter traces. These tests cover its serialized chart data and Gradio callbacks;
 they do not assert pixel-identical browser rendering across Plotly majors.
+
+## uv_build 0.13
+
+The packaging compatibility job installs `uv_build==0.13.7` and invokes
+`python -m build --no-isolation`. The build frontend's default operation builds
+an sdist and then builds the wheel from that sdist. CI checks the wheel's backend
+generator metadata, installs it over the editable project, and runs the installed
+CLI outside the checkout. This verifies both package contents and entry points.
+
+The existing `uv build` job remains in place, but it may use a
+[bundled backend](https://docs.astral.sh/uv/concepts/build-backend/#bundled-build-backend).
+The additional job explicitly exercises the newly allowed backend version.
