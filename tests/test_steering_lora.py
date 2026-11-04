@@ -6,6 +6,7 @@ import pytest
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from peft import LoraConfig
 from peft.tuners.lora.layer import Linear
 
 from abliterix.core.engine import SteeringEngine, _required_lora_rank
@@ -24,6 +25,8 @@ def _make_lora_engine(config, *, rank: int, in_features: int, out_features: int)
     module = Linear(
         base,
         "default",
+        # PEFT 0.20 requires config; 0.18 accepts it through **kwargs.
+        config=LoraConfig(r=rank, lora_alpha=rank),
         r=rank,
         lora_alpha=rank,
         lora_dropout=0,

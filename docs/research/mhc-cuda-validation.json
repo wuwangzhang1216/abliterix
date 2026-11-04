@@ -1,0 +1,83 @@
+{
+  "scope": "Random tiny checkpoints through the normal HF engine. Unquantized eager CUDA execution; no full released checkpoint or quality evaluation.",
+  "gpu": "NVIDIA GeForce RTX 4080 Laptop GPU",
+  "driver": "596.08",
+  "python": "3.12.2",
+  "torch": "2.11.0+cu130",
+  "transformers": "5.20.2",
+  "peft": "0.20.0",
+  "suite": "tests/test_mhc_integration.py -k cuda",
+  "attention_implementation": "eager",
+  "export_tolerance_bfloat16": {
+    "atol": 0.002,
+    "rtol": 0.02,
+    "reason": "FP32 adapter merge rounds into BF16 base weights"
+  },
+  "greedy_export_token_ids_equal": true,
+  "tests": [
+    {
+      "name": "test_mhc_cuda_reads_replay_and_export[deepseek_v4-lora-float32]",
+      "measurements": {
+        "readout_max_abs_error": 0.0,
+        "export_max_abs_logit_error": 2.2351741790771484e-08
+      },
+      "passed": true
+    },
+    {
+      "name": "test_mhc_cuda_reads_replay_and_export[deepseek_v4-lora-bfloat16]",
+      "measurements": {
+        "readout_max_abs_error": 0.0,
+        "export_max_abs_logit_error": 0.0009765625
+      },
+      "passed": true
+    },
+    {
+      "name": "test_mhc_cuda_reads_replay_and_export[deepseek_v4-direct-float32]",
+      "measurements": {
+        "readout_max_abs_error": 0.0,
+        "export_max_abs_logit_error": 0.0
+      },
+      "passed": true
+    },
+    {
+      "name": "test_mhc_cuda_reads_replay_and_export[deepseek_v4-direct-bfloat16]",
+      "measurements": {
+        "readout_max_abs_error": 0.0,
+        "export_max_abs_logit_error": 0.0
+      },
+      "passed": true
+    },
+    {
+      "name": "test_mhc_cuda_reads_replay_and_export[glm5_next-lora-float32]",
+      "measurements": {
+        "readout_max_abs_error": 0.0,
+        "export_max_abs_logit_error": 2.9802322387695312e-08
+      },
+      "passed": true
+    },
+    {
+      "name": "test_mhc_cuda_reads_replay_and_export[glm5_next-lora-bfloat16]",
+      "measurements": {
+        "readout_max_abs_error": 0.0,
+        "export_max_abs_logit_error": 0.0009765625
+      },
+      "passed": true
+    },
+    {
+      "name": "test_mhc_cuda_reads_replay_and_export[glm5_next-direct-float32]",
+      "measurements": {
+        "readout_max_abs_error": 0.0,
+        "export_max_abs_logit_error": 0.0
+      },
+      "passed": true
+    },
+    {
+      "name": "test_mhc_cuda_reads_replay_and_export[glm5_next-direct-bfloat16]",
+      "measurements": {
+        "readout_max_abs_error": 0.0,
+        "export_max_abs_logit_error": 0.0
+      },
+      "passed": true
+    }
+  ]
+}
