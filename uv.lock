@@ -94,7 +94,7 @@ requires-dist = [
     { name = "scikit-learn", marker = "extra == 'research'", specifier = "~=1.7" },
     { name = "speculators", marker = "extra == 'vllm'", specifier = ">=0.1.9" },
     { name = "transformers", specifier = "~=5.3" },
-    { name = "vllm", marker = "extra == 'vllm'", specifier = ">=0.18,<0.21" },
+    { name = "vllm", marker = "extra == 'vllm'", specifier = ">=0.18,<0.32" },
 ]
 provides-extras = ["research", "ui", "bench", "vllm"]
 
