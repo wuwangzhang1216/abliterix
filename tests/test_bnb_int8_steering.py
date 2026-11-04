@@ -9,6 +9,7 @@ import torch.nn.functional as F
 
 bnb = pytest.importorskip("bitsandbytes")
 
+from peft import LoraConfig
 from peft.tuners.lora.bnb import Linear8bitLt as LoraInt8Linear
 from peft.tuners.lora.layer import Linear as LoraLinear
 
@@ -43,7 +44,9 @@ def _forward_then_wrap():
     assert base.weight.CB is None and base.weight.SCB is None
     assert base.state.CB is not None and base.state.SCB is not None
     expected_weight = base.state.CB.float() * base.state.SCB.float()[:, None] / 127
-    module = LoraInt8Linear(base, "default", r=3, lora_alpha=3).eval()
+    module = LoraInt8Linear(
+        base, "default", config=LoraConfig(r=3, lora_alpha=3), r=3, lora_alpha=3
+    ).eval()
     return module, inputs, baseline, expected_weight
 
 
@@ -65,7 +68,13 @@ def test_real_int8_forward_then_steering_matches_float_reference(
     scales_before = module.base_layer.state.SCB.clone()
     reference_base = nn.Linear(8, 8, bias=False)
     reference_base.weight.data.copy_(expected_weight)
-    reference = LoraLinear(reference_base, "default", r=3, lora_alpha=3).eval()
+    reference = LoraLinear(
+        reference_base,
+        "default",
+        config=LoraConfig(r=3, lora_alpha=3),
+        r=3,
+        lora_alpha=3,
+    ).eval()
     vectors = F.normalize(torch.randn(2, 8), dim=1)
     profiles = {
         "attn.o_proj": SteeringProfile(

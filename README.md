@@ -202,6 +202,8 @@ python scripts/generate_configs.py --family llama   # Only Llama family
 
 For MoE-specific steering mechanisms (EGA, expert profiling, router suppression), see [docs/moe.md](docs/moe.md).
 
+For native DeepSeek-V4 and GLM-5.3-Flash multi-stream readouts, use the separate [runtime profile](docs/model-runtime-mhc.md) and review the [validation scope](docs/model-compatibility.md). Tiny native models are tested through the HF engine on CPU and CUDA; full released-checkpoint and quality acceptance remain open in [#19](https://github.com/wuwangzhang1216/abliterix/issues/19).
+
 
 ## Hardware & VRAM
 
