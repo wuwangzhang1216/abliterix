@@ -33,6 +33,9 @@ except ImportError:
         "Gradio is required for the Web UI.  Install it with: pip install abliterix[ui]"
     ) from None
 
+# Gradio 6 moved app styling to launch() and removed Chatbot's type argument.
+_GRADIO_6_OR_NEWER = int(gr.__version__.split(".", 1)[0]) >= 6
+
 try:
     import plotly.graph_objects as go
 except ImportError:
@@ -432,10 +435,13 @@ def _build_pareto_plot() -> object | None:
 def _build_ui() -> gr.Blocks:
     """Construct the Gradio Blocks interface."""
     config_choices = _find_configs()
+    blocks_kwargs = (
+        {} if _GRADIO_6_OR_NEWER else {"theme": gr.themes.Soft(primary_hue="violet")}
+    )
 
     with gr.Blocks(
         title="Abliterix — LLM Steering Dashboard",
-        theme=gr.themes.Soft(primary_hue="violet"),
+        **blocks_kwargs,
     ) as app:
         gr.Markdown("# Abliterix — LLM Steering Dashboard")
         gr.Markdown(
@@ -600,7 +606,12 @@ def _build_ui() -> gr.Blocks:
 
             # ------ Tab 4: Chat ------
             with gr.Tab("Chat"):
-                chatbot = gr.Chatbot(label="Chat with Steered Model", type="messages")
+                chat_kwargs = (
+                    {"allow_tags": False}
+                    if _GRADIO_6_OR_NEWER
+                    else {"type": "messages"}
+                )
+                chatbot = gr.Chatbot(label="Chat with Steered Model", **chat_kwargs)
                 chat_input = gr.Textbox(
                     label="Message", placeholder="Type a message..."
                 )
@@ -768,10 +779,14 @@ def launch_ui(
     """Launch the Gradio Web UI."""
     print("Launching Abliterix Web UI...")
     app = _build_ui()
+    launch_kwargs = (
+        {"theme": gr.themes.Soft(primary_hue="violet")} if _GRADIO_6_OR_NEWER else {}
+    )
     app.launch(
         share=share,
         server_name=server_name,
         server_port=server_port,
+        **launch_kwargs,
     )
 
 

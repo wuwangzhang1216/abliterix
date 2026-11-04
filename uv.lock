@@ -74,7 +74,7 @@ requires-dist = [
     { name = "bitsandbytes", marker = "platform_machine != 'arm64' or sys_platform != 'darwin'", specifier = "~=0.45" },
     { name = "datasets", specifier = ">=4,<6" },
     { name = "geom-median", marker = "extra == 'research'", specifier = "~=0.1" },
-    { name = "gradio", marker = "extra == 'ui'", specifier = "~=5.20" },
+    { name = "gradio", marker = "extra == 'ui'", specifier = ">=5.50,<7.0" },
     { name = "hf-transfer", specifier = "~=0.1" },
     { name = "huggingface-hub", specifier = "~=1.6" },
     { name = "imageio", marker = "extra == 'research'", specifier = ">=2.36" },

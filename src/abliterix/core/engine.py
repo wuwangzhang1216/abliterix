@@ -23,6 +23,7 @@ from transformers import (
     AutoTokenizer,
     BatchEncoding,
     BitsAndBytesConfig,
+    GenerationConfig,
     PretrainedConfig,
     PreTrainedModel,
     PreTrainedTokenizerBase,
@@ -39,6 +40,7 @@ from ..types import ChatMessage, QuantMode, SteeringMode, VectorMethod, WeightNo
 from ..util import chunk_batches, flush_memory, print
 from .bnb_utils import is_bnb_int8_weight, validate_bnb_int8_weight
 from . import fp8_utils
+from .mhc import capture_mhc_reads, native_mhc_backbone
 from .quantization_validation import validate_quantization_state
 
 # transformers < 5.0 uses torch_dtype=, >= 5.0 uses dtype= in from_pretrained.
@@ -155,14 +157,65 @@ def resolve_model_class(
     of dual-registered MoE VLMs such as some Qwen3.5-MoE checkpoints).
     """
     configs = PretrainedConfig.get_config_dict(model_id, revision=revision)
+    config_dicts = configs if isinstance(configs, tuple) else (configs,)
+    for cfg in config_dicts:
+        if isinstance(cfg, dict):
+            _validate_transformers_architecture(cfg)
     if text_only:
         return AutoModelForCausalLM
-
-    config_dicts = configs if isinstance(configs, tuple) else (configs,)
 
     if any(isinstance(cfg, dict) and "vision_config" in cfg for cfg in config_dicts):
         return AutoModelForImageTextToText
     return AutoModelForCausalLM
+
+
+def _validate_transformers_architecture(
+    config: dict[str, Any], runtime: AbliterixConfig | None = None
+) -> None:
+    """Explain missing upstream registrations without changing dependencies."""
+    from transformers.models.auto.configuration_auto import CONFIG_MAPPING
+
+    auto_map = config.get("auto_map")
+    if isinstance(auto_map, dict) and auto_map.get("AutoConfig"):
+        return
+    for cfg in (config, config.get("text_config")):
+        if not isinstance(cfg, dict):
+            continue
+        model_type = cfg.get("model_type")
+        if model_type not in {"deepseek_v4", "glm5_next", "glm5_next_text"}:
+            continue
+        # A checkpoint with its own configuration class follows the existing
+        # trust_remote_code flow rather than requiring a native registration.
+        auto_map = cfg.get("auto_map")
+        if isinstance(auto_map, dict) and auto_map.get("AutoConfig"):
+            continue
+        if model_type not in CONFIG_MAPPING:
+            raise RuntimeError(
+                f"Installed Transformers {_tf.__version__} does not register "
+                f"the {model_type!r} architecture. Official model code is present "
+                "in Transformers 5.20.2. See docs/model-compatibility.md "
+                "for the native multi-stream runtime and validation scope."
+            )
+        if runtime is None:
+            continue
+        if model_type == "glm5_next" and runtime.model.text_only:
+            raise ValueError(
+                "GLM-5.3-Flash uses AutoModelForImageTextToText for text prompts too. "
+                "Set model.text_only=false to load its native generation head."
+            )
+        if (
+            runtime.model.backend != "hf"
+            or runtime.model.use_torch_compile
+            or runtime.steering.steering_mode
+            not in (SteeringMode.LORA, SteeringMode.DIRECT)
+            or runtime.steering.vector_method == VectorMethod.RDO
+            or runtime.steering.cliff_head_ablation
+        ):
+            raise ValueError(
+                "Native mHC reads support eager HF direct and LoRA weight edits. "
+                "Runtime block-output hooks, RDO and cliff-head ablation need "
+                "separate stream/head mappings. See docs/model-compatibility.md."
+            )
 
 
 def _bf16_compute_supported() -> bool:
@@ -184,6 +237,7 @@ def _register_mtp_layer_types_adapter(
     model_id: str,
     trust_remote_code: bool | None,
     revision: str | None = None,
+    runtime: AbliterixConfig | None = None,
 ) -> None:
     """Register models whose ``layer_types`` includes MTP head layers.
 
@@ -202,7 +256,17 @@ def _register_mtp_layer_types_adapter(
             trust_remote_code=trust_remote_code,
             revision=revision,
         )
-        cfg_dict = cfgs[0] if isinstance(cfgs, tuple) else cfgs
+    except Exception:
+        return
+
+    cfg_dict = cfgs[0] if isinstance(cfgs, tuple) else cfgs
+    if not isinstance(cfg_dict, dict):
+        return
+    # Reuse the metadata already fetched by this preflight, before tokenizer
+    # or model loading. Unsupported native architectures need an actionable
+    # error, not an implicit global Transformers upgrade.
+    _validate_transformers_architecture(cfg_dict, runtime)
+    try:
         layer_types = cfg_dict.get("layer_types")
         n_hidden = cfg_dict.get("num_hidden_layers")
         if not (layer_types and n_hidden and len(layer_types) > n_hidden):
@@ -335,6 +399,56 @@ def _captured_logprobs(sampler: _LogitsSampler, expected_steps: int) -> Tensor:
     return stacked
 
 
+def _make_generation_config_savable(model: Module) -> None:
+    """Normalize inactive sampling parameters without changing decoding mode.
+
+    Model defaults can retain sampling parameters after the caller selects
+    greedy or beam decoding. Transformers rejects those settings on save,
+    even though generation ignores them. Repair a copy, preserving the
+    caller's selected mode and leaving unrelated validation errors visible.
+    """
+    import copy
+
+    generation_config = getattr(model, "generation_config", None)
+    if generation_config is None:
+        return
+    try:
+        generation_config.validate(strict=True)
+        return
+    except ValueError:
+        pass
+    if generation_config.do_sample is True:
+        return
+
+    repaired = copy.deepcopy(generation_config)
+    defaults = GenerationConfig()
+    for name in (
+        "temperature",
+        "top_p",
+        "min_p",
+        "top_h",
+        "typical_p",
+        "top_k",
+        "epsilon_cutoff",
+        "eta_cutoff",
+    ):
+        if hasattr(repaired, name) and hasattr(defaults, name):
+            setattr(repaired, name, getattr(defaults, name))
+    # top_k also selects contrastive search in older Transformers releases.
+    # Never silently change that mode to greedy decoding during export.
+    if repaired.get_generation_mode() != generation_config.get_generation_mode():
+        return
+    try:
+        repaired.validate(strict=True)
+    except ValueError:
+        return
+    print(
+        "* [yellow]Resetting inactive sampling parameters in the exported "
+        "generation config; the selected decoding mode is unchanged[/]"
+    )
+    model.generation_config = repaired
+
+
 def _forward_supports_kwarg(model: Module, name: str) -> bool:
     """Return whether the underlying model explicitly accepts a keyword.
 
@@ -441,6 +555,7 @@ class SteeringEngine:
             model_id,
             config.model.trust_remote_code,
             config.model.revision,
+            runtime=config,
         )
 
         self.tokenizer = load_tokenizer(
@@ -702,6 +817,17 @@ class SteeringEngine:
         if self.model is None:
             raise RuntimeError("Failed to load model with all configured dtypes.")
 
+        if native_mhc_backbone(self.model) is not None:
+            # Check the actual native class too when remote metadata bypassed
+            # preflight, before installing adapters or compiling the model.
+            _validate_transformers_architecture(
+                {"model_type": self.model.config.model_type}, runtime=config
+            )
+            print(
+                "* Native mHC readouts: per-block attention inputs and final "
+                "normalized LM-head input"
+            )
+
         # bnb 4-bit: non-quantized tensors (embed/norm/lm_head) may still be
         # float16 after load (including dtype="auto" when the checkpoint is
         # float16). When native bf16 is available, promote live float16 params
@@ -801,6 +927,56 @@ class SteeringEngine:
         encode_fn = mod.encode_messages
         tok = self.tokenizer
 
+        # DeepSeek-V4's official encoder has no add_generation_prompt: it ends a
+        # conversation whose last message is from the user with the assistant
+        # prefix itself. Only pass the flag to encoders that accept it.
+        signature = inspect.signature(encode_fn)
+        params = signature.parameters
+        prompt_param = params.get("add_generation_prompt")
+        if prompt_param is not None and prompt_param.kind in (
+            prompt_param.VAR_POSITIONAL,
+            prompt_param.VAR_KEYWORD,
+        ):
+            prompt_param = None
+        takes_generation_prompt = prompt_param is not None or any(
+            p.kind is p.VAR_KEYWORD for p in params.values()
+        )
+        # Bind once so required options and misspelled encoder_kwargs fail at
+        # installation. BoundArguments also handles positional-only flags.
+        call_kwargs = dict(encoder_kwargs)
+        if takes_generation_prompt:
+            call_kwargs["add_generation_prompt"] = False
+        positional_args: list[Any] = [[]]
+        for p in list(params.values())[1:]:
+            if p.kind is not p.POSITIONAL_ONLY:
+                break
+            if p.name in call_kwargs:
+                positional_args.append(call_kwargs.pop(p.name))
+            elif p.default is not p.empty:
+                positional_args.append(p.default)
+            else:
+                raise TypeError(f"Custom encoder {path} requires option {p.name!r}")
+        try:
+            signature.bind(*positional_args, **call_kwargs)
+        except TypeError as exc:
+            raise TypeError(
+                f"Invalid options for custom encoder {path}: {exc}"
+            ) from exc
+
+        def _encode(messages, add_generation_prompt: bool) -> str:
+            bound = signature.bind(messages, *positional_args[1:], **call_kwargs)
+            if takes_generation_prompt:
+                if prompt_param is not None:
+                    bound.arguments["add_generation_prompt"] = add_generation_prompt
+                else:
+                    kwargs_name = next(
+                        p.name for p in params.values() if p.kind is p.VAR_KEYWORD
+                    )
+                    bound.arguments[kwargs_name]["add_generation_prompt"] = (
+                        add_generation_prompt
+                    )
+            return encode_fn(*bound.args, **bound.kwargs)
+
         def _patched(
             conversation,
             tokenize: bool = True,
@@ -814,20 +990,9 @@ class SteeringEngine:
                 and conversation
                 and isinstance(conversation[0], list)
             ):
-                texts = [
-                    encode_fn(
-                        c,
-                        add_generation_prompt=add_generation_prompt,
-                        **encoder_kwargs,
-                    )
-                    for c in conversation
-                ]
+                texts = [_encode(c, add_generation_prompt) for c in conversation]
             else:
-                texts = encode_fn(
-                    conversation,
-                    add_generation_prompt=add_generation_prompt,
-                    **encoder_kwargs,
-                )
+                texts = _encode(conversation, add_generation_prompt)
 
             if not tokenize:
                 return texts
@@ -837,10 +1002,13 @@ class SteeringEngine:
                 return_tensors=return_tensors,
                 padding=kw.get("padding", False),
                 truncation=kw.get("truncation", False),
+                # Encoders own their BOS/EOS tokens, like HF chat templates.
+                add_special_tokens=False,
             )
             return enc["input_ids"]
 
         tok.apply_chat_template = _patched  # type: ignore[assignment]
+        self._custom_encoder_installed = True
         print(
             f"  [dim]Installed custom encoder from {path.name} "
             f"(kwargs={encoder_kwargs or {}})[/]"
@@ -1188,6 +1356,10 @@ class SteeringEngine:
             _register("attn.v_proj", layer.self_attn.v_proj)  # ty:ignore[possibly-missing-attribute]
         with suppress(Exception):
             _register("attn.o_proj", layer.self_attn.o_proj)  # ty:ignore[possibly-missing-attribute]
+        # DeepSeek-V4 — the grouped attention output goes through o_a_proj,
+        # then o_b_proj back to the hidden size; o_b_proj writes the residual.
+        with suppress(Exception):
+            _register("attn.o_proj", layer.self_attn.o_b_proj)  # ty:ignore[possibly-missing-attribute]
 
         # Multi-head Latent Attention (MLA) projections — DeepSeek-V2/V3,
         # GLM-4.7-Flash, Qwen3-Next. Q goes through a low-rank LoRA pair
@@ -1696,11 +1868,14 @@ class SteeringEngine:
                     p.data = adapter_state[n].to(p.device)
 
             print("* Merging LoRA adapters into base model...")
-            return peft_model.merge_and_unload()
+            merged = peft_model.merge_and_unload()
+            _make_generation_config_savable(merged)
+            return merged
         else:
             print("* Merging LoRA adapters into base model...")
             merged = self.model.merge_and_unload()
             self.needs_reload = True
+            _make_generation_config_savable(merged)
             return merged
 
     def _cache_dequant(self, mid: int, weight: Tensor) -> None:
@@ -1775,6 +1950,13 @@ class SteeringEngine:
     # Tokenisation helpers
     # ------------------------------------------------------------------
 
+    def _chat_tokenizer_options(self) -> dict[str, bool]:
+        # The engine also tokenizes text rendered with tokenize=False. Keep
+        # that path consistent with the custom encoder's direct tokenization.
+        if getattr(self, "_custom_encoder_installed", False):
+            return {"add_special_tokens": False}
+        return {}
+
     def _render_messages(self, messages: list[ChatMessage]) -> list[str]:
         """Render messages exactly as the model-facing tokenizer sees them."""
         chats = []
@@ -1810,6 +1992,7 @@ class SteeringEngine:
             padding=False,
             return_attention_mask=False,
             return_token_type_ids=False,
+            **self._chat_tokenizer_options(),
         )
         input_ids = encoded["input_ids"]
         lengths = [len(row) for row in input_ids]
@@ -1841,6 +2024,7 @@ class SteeringEngine:
             return_tensors="pt",
             padding=True,
             return_token_type_ids=False,
+            **self._chat_tokenizer_options(),
         ).to(self.model.device)
 
     # ------------------------------------------------------------------
@@ -2016,7 +2200,7 @@ class SteeringEngine:
         messages: list[ChatMessage],
         token_offset: int = -1,
     ) -> Tensor:
-        """Return per-layer residual vectors at a configurable token position.
+        """Return per-layer observable vectors at a configurable token position.
 
         Parameters
         ----------
@@ -2028,6 +2212,11 @@ class SteeringEngine:
             are encoded separately from refusal.
 
         Shape of the returned tensor: ``(batch, layers+1, hidden_dim)``.
+        Native mHC slots ``0..layers-1`` are each block's attention input
+        after learned stream routing and before RMSNorm. The last slot is
+        the final normalized LM-head input. Other models use their standard
+        hidden-state tuple. These are distinct representation conventions;
+        native mHC reads do not reconstruct the full residual streams.
         """
         inputs = self._tokenize(messages)
         self._reset_position_cache()
@@ -2047,17 +2236,27 @@ class SteeringEngine:
             )
             self._logits_to_keep_support = cache
 
-        forward_kwargs: dict[str, Any] = {"output_hidden_states": True}
+        forward_kwargs: dict[str, Any] = {}
         if cache[1]:
             forward_kwargs["logits_to_keep"] = 1
 
-        outputs = self.model(**inputs, **forward_kwargs)
-        hidden_states = outputs.hidden_states
-
-        residuals = torch.stack(
-            [hs[:, token_offset, :] for hs in hidden_states],
-            dim=1,
-        ).to(torch.float32)
+        backbone = native_mhc_backbone(self.model)
+        if backbone is not None:
+            residuals = capture_mhc_reads(
+                self.model, backbone, inputs, token_offset, forward_kwargs
+            )
+        else:
+            outputs = self.model(**inputs, **forward_kwargs, output_hidden_states=True)
+            slices = []
+            for hs in outputs.hidden_states:
+                if hs.ndim != 3:
+                    raise RuntimeError(
+                        "Hidden-state extraction requires (batch, sequence, hidden) "
+                        f"tensors; received shape {tuple(hs.shape)} from an unsupported "
+                        "model implementation. See docs/model-compatibility.md."
+                    )
+                slices.append(hs[:, token_offset])
+            residuals = torch.stack(slices, dim=1).to(torch.float32)
 
         q = self.config.steering.outlier_quantile
         if 0 <= q < 1:
@@ -2284,6 +2483,7 @@ class SteeringEngine:
             text,
             return_tensors="pt",
             return_token_type_ids=False,
+            **self._chat_tokenizer_options(),
         ).to(self.model.device)
 
         streamer = TextStreamer(

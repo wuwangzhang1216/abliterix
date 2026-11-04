@@ -202,6 +202,10 @@ python scripts/generate_configs.py --family llama   # Only Llama family
 
 For MoE-specific steering mechanisms (EGA, expert profiling, router suppression), see [docs/moe.md](docs/moe.md).
 
+For native DeepSeek-V4 and GLM-5.3-Flash multi-stream readouts, use the separate [runtime profile](docs/model-runtime-mhc.md) and review the [validation scope](docs/model-compatibility.md). Tiny native models are tested through the HF engine on CPU and CUDA; full released-checkpoint and quality acceptance remain open in [#19](https://github.com/wuwangzhang1216/abliterix/issues/19).
+
+The same runtime includes [native Kimi wrapper tests](docs/kimi-compatibility.md) for loading, modification, and export with small local models. Full K2.5/K2.6 checkpoint acceptance is tracked in [#16](https://github.com/wuwangzhang1216/abliterix/issues/16).
+
 
 ## Hardware & VRAM
 
@@ -243,6 +247,8 @@ The deep details live in `docs/` and `benchmarks/`:
 - **[docs/fp4_repack.md](docs/fp4_repack.md)** — abliterate native FP4 (MXFP4/NVFP4) models and re-pack to 4-bit offline, no BF16 blow-up.
 - **[docs/configuration.md](docs/configuration.md)** — config loading order, the 150+ shipped configs, the Web UI, and research-mode visualization.
 - **[docs/datasets.md](docs/datasets.md)** — current public defaults, prompt roles, and historical bilingual corpus availability. Bilingual coverage requires supplying those datasets; it is not included automatically.
+- **[docs/minimax-h3.md](docs/minimax-h3.md)** — source-preserving video Prompt Sets, media manifests, and the H3 training boundary.
+- **[docs/video-dataset-audit-2026-08.md](docs/video-dataset-audit-2026-08.md)** — historical video dataset report and current validation limitations.
 - **[docs/references.md](docs/references.md)** — paper references and BibTeX.
 - **[docs/benchmarks/2026-05-pod-validation.md](docs/benchmarks/2026-05-pod-validation.md)** — measured 10-feature sweep on Qwen2.5-7B-Instruct with LLM judge (Blackwell GPU).
 - **[benchmarks/METHOD_MATRIX.md](benchmarks/METHOD_MATRIX.md)** — cross-model method matrix for promoting methods through the maturity ladder.
