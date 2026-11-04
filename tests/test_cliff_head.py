@@ -1,7 +1,7 @@
 """Tests for abliterix.cliff_head — attention-head ablation for reasoning models.
 
-Verifies the implementation of Bao et al. 2025 (arXiv:2510.06036) ported
-in reverse (we ablate pro-refusal heads instead of anti-refusal ones).
+Verifies the static weight-alignment heuristic and its storage contract.
+These tests do not establish causal head identity or behavioral effects.
 
 All tests use a synthetic mock engine with a tiny multi-head attention
 shape — no real model, no GPU.
@@ -261,8 +261,13 @@ def test_apply_ablation_strength_zero_is_noop():
     assert torch.allclose(engine._o_projs[0].weight, original)
 
 
-def test_restore_roundtrip():
+@pytest.mark.parametrize(
+    "dtype", [torch.float16, torch.bfloat16, torch.float32, torch.float64]
+)
+def test_restore_roundtrip(dtype):
     engine = _make_engine(n_layers=2, num_heads=4, head_dim=8)
+    for module in engine._o_projs:
+        module.to(dtype=dtype)
     snapshots = [w.weight.detach().clone() for w in engine._o_projs]
 
     heads = [
@@ -340,6 +345,97 @@ def test_missing_num_heads_raises():
     )
     with pytest.raises(RuntimeError, match="num_attention_heads"):
         identify_safety_heads(engine, torch.randn(2, 128), top_k_frac=0.1)
+
+
+@pytest.mark.parametrize(
+    "storage", ["int8", "fp8", "meta", "bnb4_lazy", "bnb8_lazy", "offload"]
+)
+def test_unsupported_storage_rejects_scoring_and_preserves_prior_edits(storage):
+    """A later unsupported projection must not partly edit an earlier layer."""
+    engine = _make_engine(n_layers=2, num_heads=2, head_dim=2)
+    apply_cliff_head_ablation(engine, [HeadScore(0, 1, 1.0)], strength=0.25)
+    before = engine._o_projs[0].weight.detach().clone()
+    cache = engine._cliff_head_originals
+    cached_items = dict(cache)
+    bad = engine._o_projs[1]
+    if storage == "int8":
+        bad.weight = nn.Parameter(
+            torch.ones(4, 4, dtype=torch.int8), requires_grad=False
+        )
+    elif storage == "fp8":
+        bad.weight = nn.Parameter(
+            torch.ones(4, 4).to(torch.float8_e4m3fn), requires_grad=False
+        )
+    elif storage == "meta":
+        bad.to("meta")
+    elif storage in {"bnb4_lazy", "bnb8_lazy"}:
+        bnb = pytest.importorskip("bitsandbytes")
+        bad = (
+            bnb.nn.Linear4bit(4, 4, bias=False)
+            if storage == "bnb4_lazy"
+            else bnb.nn.Linear8bitLt(4, 4, bias=False, has_fp16_weights=False)
+        )
+        engine._o_projs[1] = bad
+        # Before first use, both packed formats can look like ordinary floats.
+        assert bad.weight.is_floating_point()
+    else:
+        bad._hf_hook = SimpleNamespace(hooks=[SimpleNamespace(offload=True)])
+
+    with pytest.raises(RuntimeError, match="resident dense floating-point.*layer 1"):
+        identify_safety_heads(engine, torch.ones(3, 4), top_k_frac=1.0)
+    with pytest.raises(RuntimeError, match="resident dense floating-point.*layer 1"):
+        apply_cliff_head_ablation(
+            engine, [HeadScore(0, 0, 1.0), HeadScore(1, 0, 1.0)], strength=0.5
+        )
+    torch.testing.assert_close(engine._o_projs[0].weight, before, rtol=0, atol=0)
+    assert engine._cliff_head_originals is cache
+    assert cache.keys() == cached_items.keys()
+    assert all(cache[key] is item for key, item in cached_items.items())
+
+
+@pytest.mark.parametrize("layer,head", [(1, -1), (1, 2), (-1, 0), (2, 0)])
+def test_invalid_head_address_does_not_edit_weights_or_create_restore_cache(
+    layer, head
+):
+    engine = _make_engine(n_layers=2, num_heads=2, head_dim=2)
+    before = [module.weight.detach().clone() for module in engine._o_projs]
+    with pytest.raises(ValueError, match="Invalid cliff-head"):
+        apply_cliff_head_ablation(
+            engine, [HeadScore(0, 0, 1.0), HeadScore(layer, head, 1.0)], strength=0.5
+        )
+    assert not hasattr(engine, "_cliff_head_originals")
+    for module, original in zip(engine._o_projs, before):
+        torch.testing.assert_close(module.weight, original, rtol=0, atol=0)
+
+
+def test_selected_projection_shape_mismatch_is_atomic():
+    engine = _make_engine(n_layers=2, num_heads=2, head_dim=2)
+    engine._o_projs[1] = nn.Linear(5, 4, bias=False)
+    before = engine._o_projs[0].weight.detach().clone()
+    with pytest.raises(RuntimeError, match="projection shape at layer 1"):
+        apply_cliff_head_ablation(
+            engine, [HeadScore(0, 0, 1.0), HeadScore(1, 0, 1.0)], strength=0.5
+        )
+    assert not hasattr(engine, "_cliff_head_originals")
+    torch.testing.assert_close(engine._o_projs[0].weight, before, rtol=0, atol=0)
+
+
+def test_duplicate_head_selection_scales_once():
+    engine = _make_engine(n_layers=1, num_heads=2, head_dim=2)
+    before = engine._o_projs[0].weight.detach().clone()
+    head = HeadScore(0, 1, 1.0)
+    assert apply_cliff_head_ablation(engine, [head, head], strength=0.5) == 1
+    torch.testing.assert_close(engine._o_projs[0].weight[:, 2:], before[:, 2:] * 0.5)
+
+
+@pytest.mark.parametrize("strength", [-0.1, 1.1, float("nan"), float("inf")])
+def test_invalid_public_api_strength_fails_before_mutation(strength):
+    engine = _make_engine(n_layers=1, num_heads=2, head_dim=2)
+    before = engine._o_projs[0].weight.detach().clone()
+    with pytest.raises(ValueError, match="finite and in"):
+        apply_cliff_head_ablation(engine, [HeadScore(0, 0, 1.0)], strength=strength)
+    assert not hasattr(engine, "_cliff_head_originals")
+    torch.testing.assert_close(engine._o_projs[0].weight, before, rtol=0, atol=0)
 
 
 # ---------------------------------------------------------------------------
