@@ -5,6 +5,6 @@ huggingface-hub==2.4.0
 tokenizers==0.23.3
 safetensors==0.8.0
 peft==0.20.0
-kernels==0.17.2
+kernels==0.18.1
 datasets==5.1.0
 pyarrow==24.0.0
