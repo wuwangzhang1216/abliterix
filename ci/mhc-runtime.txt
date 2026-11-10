@@ -5,5 +5,5 @@ transformers==5.20.2
 huggingface-hub==1.33.0
 tokenizers==0.23.3
 safetensors==0.8.0
-peft==0.20.0
+peft==0.21.2
 kernels==0.17.2
