@@ -6,5 +6,5 @@ tokenizers==0.23.3
 safetensors==0.8.0
 peft==0.20.0
 kernels==0.17.2
-datasets==5.1.0
+datasets==5.2.0
 pyarrow==24.0.0
