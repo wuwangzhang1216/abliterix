@@ -49,6 +49,9 @@ class WeightNorm(str, Enum):
     PRE = "pre"
     # POST = "post"  # Theoretically valid but empirically useless.
     FULL = "full"
+    # Rescale along the projected axis (columns for output-side, rows for
+    # input-side) so exact orthogonality v^T W_new == 0 is preserved.
+    PROJECTED = "projected"
 
 
 class DirectTransform(str, Enum):

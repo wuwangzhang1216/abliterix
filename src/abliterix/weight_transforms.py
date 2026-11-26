@@ -99,12 +99,40 @@ def double_gram_schmidt(
 # ---------------------------------------------------------------------------
 
 
+def _rescale_norms(
+    W_orig: Tensor,
+    W_new: Tensor,
+    *,
+    axis_is_in: bool,
+    preserve_row_norm: bool,
+    preserve_projected_norm: bool,
+) -> Tensor:
+    """Restore per-slice L2 norms after a rank-1 or subspace projection.
+
+    When ``preserve_projected_norm`` is True, rescales along the projected axis
+    (``dim=-1`` for input-side projections, ``dim=-2`` for output-side
+    projections), which multiplies each projected vector by a positive scalar
+    and preserves exact orthogonality ``v^T W_new == 0`` (at strength 1).
+    Legacy ``preserve_row_norm`` rescales ``dim=-1`` regardless of side.
+    """
+    if preserve_projected_norm:
+        dim = -1 if axis_is_in else -2
+    elif preserve_row_norm:
+        dim = -1
+    else:
+        return W_new
+    orig_norms = torch.linalg.vector_norm(W_orig, dim=dim, keepdim=True)
+    new_norms = torch.linalg.vector_norm(W_new, dim=dim, keepdim=True).clamp(min=1e-8)
+    return W_new * (orig_norms / new_norms)
+
+
 def apply_standard_transform(
     W: Tensor,
     refusal: Tensor,
     *,
     strength: float = 1.0,
     preserve_row_norm: bool = False,
+    preserve_projected_norm: bool = False,
 ) -> Tensor:
     """The plain rank-1 ablation used by the historical direct path.
 
@@ -113,29 +141,33 @@ def apply_standard_transform(
 
     ``preserve_row_norm`` reproduces the engine's post-step (see
     :func:`core.steering._apply_direct_steering`): every output row (dim 1,
-    the ``out_features`` axis) is rescaled to its original L2 norm. It is
-    exposed here so the offline repack path
-    (:mod:`abliterix.core.fp4_repack`) reproduces the in-engine direct-mode
-    edit exactly; leave it ``False`` to get the bare projection (the
-    historical helper behaviour, kept for existing callers).
+    the ``out_features`` axis) is rescaled to its original L2 norm. Setting
+    ``preserve_projected_norm=True`` rescales along the projected axis instead
+    (columns for output-side, rows for input-side) so exact orthogonality is
+    preserved.
     """
     d = _normalise(refusal.to(dtype=torch.float32))
     W32 = W.to(dtype=torch.float32)
     if W32.shape[1] == d.shape[0]:
         # Input-side ablation: W (out, in), direction is (in,).
+        axis_is_in = True
         new_W = W32 - strength * (W32 @ d).unsqueeze(1) * d.unsqueeze(0)
     elif W32.shape[0] == d.shape[0]:
         # Output-side ablation: W (out, in), direction is (out,).
+        axis_is_in = False
         new_W = W32 - strength * d.unsqueeze(1) * (d @ W32).unsqueeze(0)
     else:
         raise ValueError(
             f"Refusal direction shape {d.shape} does not match either axis "
             f"of W shape {W32.shape}."
         )
-    if preserve_row_norm:
-        orig_norms = torch.linalg.vector_norm(W32, dim=1, keepdim=True)
-        new_norms = torch.linalg.vector_norm(new_W, dim=1, keepdim=True).clamp(min=1e-8)
-        new_W = new_W * (orig_norms / new_norms)
+    new_W = _rescale_norms(
+        W32,
+        new_W,
+        axis_is_in=axis_is_in,
+        preserve_row_norm=preserve_row_norm,
+        preserve_projected_norm=preserve_projected_norm,
+    )
     return new_W.to(W.dtype)
 
 
@@ -187,6 +219,7 @@ def apply_ega_projection(
     strength: float,
     axis_is_in: bool,
     preserve_row_norm: bool = True,
+    preserve_projected_norm: bool = False,
 ) -> Tensor:
     """Per-expert rank-1 orthogonal projection on a fused 3-D expert weight.
 
@@ -206,12 +239,13 @@ def apply_ega_projection(
     else:
         proj = torch.einsum("o,eoi->ei", vf, W_all)  # (E, d1)
         W_new = W_all - strength * (vf.view(1, -1, 1) * proj.unsqueeze(1))
-    if preserve_row_norm:
-        orig_norms = torch.linalg.vector_norm(W_all, dim=-1, keepdim=True)
-        new_norms = torch.linalg.vector_norm(W_new, dim=-1, keepdim=True).clamp(
-            min=1e-8
-        )
-        W_new = W_new * (orig_norms / new_norms)
+    W_new = _rescale_norms(
+        W_all,
+        W_new,
+        axis_is_in=axis_is_in,
+        preserve_row_norm=preserve_row_norm,
+        preserve_projected_norm=preserve_projected_norm,
+    )
     return W_new
 
 
@@ -222,8 +256,9 @@ def apply_orba_transform(
     *,
     strength: float = 1.0,
     preserve_row_norm: bool = True,
+    preserve_projected_norm: bool = False,
 ) -> Tensor:
-    """ORBA: double-GS orthogonalisation + rank-1 ablation + optional row-norm preserve.
+    """ORBA: double-GS orthogonalisation + rank-1 ablation + optional norm preserve.
 
     For modules that write to the residual stream (e.g. attn.o_proj,
     mlp.down_proj) the canonical abliteration removes the refusal direction
@@ -243,8 +278,10 @@ def apply_orba_transform(
     different deltas on square matrices vs. the LoRA / standard paths,
     visible as a ~8x weaker ablation on Granite 4.1 8B's o_proj layers.
 
-    If ``preserve_row_norm`` is True, every output row is rescaled to its
-    original Frobenius norm in a post-step (grimjim's default).
+    If ``preserve_projected_norm`` is True, rescales along the projected axis
+    (columns for output-side, rows for input-side) so exact orthogonality is
+    preserved; else if ``preserve_row_norm`` is True, rescales every output
+    row (grimjim's legacy default).
     """
     u_hat = double_gram_schmidt(refusal, benign_dir)
     W32 = W.to(dtype=torch.float32)
@@ -252,10 +289,12 @@ def apply_orba_transform(
 
     if u_hat.shape[0] == out_f:
         # Output-side: prefered when v lives in the residual / output space.
+        axis_is_in = False
         new_W = W32 - strength * u_hat.unsqueeze(1) * (u_hat @ W32).unsqueeze(0)
     elif u_hat.shape[0] == in_f:
         # Input-side fallback for asymmetric matrices where v only matches
         # the input dim (rare for abliteration target modules).
+        axis_is_in = True
         new_W = W32 - strength * (W32 @ u_hat).unsqueeze(1) * u_hat.unsqueeze(0)
     else:
         raise ValueError(
@@ -263,10 +302,13 @@ def apply_orba_transform(
             f"of W shape {W32.shape}."
         )
 
-    if preserve_row_norm:
-        original_norms = torch.linalg.vector_norm(W32, dim=1, keepdim=True)
-        new_norms = torch.linalg.vector_norm(new_W, dim=1, keepdim=True).clamp(min=1e-8)
-        new_W = new_W * (original_norms / new_norms)
+    new_W = _rescale_norms(
+        W32,
+        new_W,
+        axis_is_in=axis_is_in,
+        preserve_row_norm=preserve_row_norm,
+        preserve_projected_norm=preserve_projected_norm,
+    )
 
     return new_W.to(W.dtype)
 
@@ -396,6 +438,7 @@ def apply_direct_transform(
     *,
     strength: float = 1.0,
     preserve_row_norm: bool = True,
+    preserve_projected_norm: bool = False,
 ) -> Tensor:
     """Route ``W`` through the requested transform.
 
@@ -405,7 +448,12 @@ def apply_direct_transform(
     t = DirectTransform(transform) if isinstance(transform, str) else transform
 
     if t == DirectTransform.STANDARD:
-        return apply_standard_transform(W, refusal, strength=strength)
+        return apply_standard_transform(
+            W,
+            refusal,
+            strength=strength,
+            preserve_projected_norm=preserve_projected_norm,
+        )
     if t == DirectTransform.ORBA:
         if benign_dir is None:
             raise ValueError(
@@ -417,6 +465,7 @@ def apply_direct_transform(
             benign_dir,
             strength=strength,
             preserve_row_norm=preserve_row_norm,
+            preserve_projected_norm=preserve_projected_norm,
         )
     if t == DirectTransform.BIPROJECTED:
         return apply_biprojected_transform(W, refusal, strength=strength)

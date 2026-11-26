@@ -76,7 +76,7 @@ class TensorEdit:
     """
 
     logical_name: str
-    kind: str  # "ega" | "direct"
+    kind: str  # "ega" | "direct" | "row_project"
     direction: Tensor  # 1-D float refusal direction
     strength: float
     preserve_row_norm: bool
@@ -87,6 +87,10 @@ class TensorEdit:
     projection_side: str | None = None  # "output" | "input"
     direct_transform: str = "standard"
     benign_dir: Tensor | None = None
+    # row_project (directional MoE router suppression):
+    rows: list[int] | None = None
+    # Orthogonality-preserving norm rescale along projected axis (columns for output-side).
+    preserve_projected_norm: bool = False
 
 
 def apply_tensor_edit(W: Tensor, edit: TensorEdit) -> Tensor:
@@ -97,6 +101,28 @@ def apply_tensor_edit(W: Tensor, edit: TensorEdit) -> Tensor:
     streaming caller turns that into a skip-with-warning rather than aborting.
     """
     W32 = W.to(torch.float32)
+    if edit.kind == "row_project":
+        if W32.dim() != 2 or not edit.rows or edit.direction is None:
+            raise ValueError(
+                f"row_project edit '{edit.logical_name}' expects a 2-D router "
+                f"weight, rows and a direction; got shape {tuple(W.shape)}"
+            )
+        if max(edit.rows) >= W32.shape[0]:
+            raise ValueError(
+                f"row_project edit '{edit.logical_name}': row {max(edit.rows)} "
+                f"out of range for {W32.shape[0]} experts"
+            )
+        v_hat = _normalise(edit.direction.to(device=W32.device, dtype=torch.float32))
+        if v_hat.shape[0] != W32.shape[1]:
+            raise ValueError(
+                f"row_project edit '{edit.logical_name}': direction len "
+                f"{v_hat.shape[0]} != hidden_dim {W32.shape[1]}"
+            )
+        out = W32.clone()
+        rows = torch.tensor(edit.rows, device=out.device)
+        proj = out[rows] @ v_hat
+        out[rows] = out[rows] - edit.strength * proj.unsqueeze(1) * v_hat.unsqueeze(0)
+        return out
     if edit.kind == "ega":
         # Producers differ in how experts are stored: gpt-oss fuses them into a
         # 3-D (E, d0, d1) parameter, DeepSeek-V4 keeps one 2-D (out, in) tensor
@@ -129,6 +155,7 @@ def apply_tensor_edit(W: Tensor, edit: TensorEdit) -> Tensor:
             strength=edit.strength,
             axis_is_in=axis_is_in,
             preserve_row_norm=edit.preserve_row_norm,
+            preserve_projected_norm=edit.preserve_projected_norm,
         )
         return out.squeeze(0) if per_expert_2d else out
 
@@ -154,6 +181,7 @@ def apply_tensor_edit(W: Tensor, edit: TensorEdit) -> Tensor:
             else edit.benign_dir.to(device=dev, dtype=torch.float32),
             strength=edit.strength,
             preserve_row_norm=edit.preserve_row_norm,
+            preserve_projected_norm=edit.preserve_projected_norm,
         ).to(torch.float32)
 
     # Standard rank-1 ablation with the engine's exact side precedence
@@ -177,9 +205,12 @@ def apply_tensor_edit(W: Tensor, edit: TensorEdit) -> Tensor:
                 f"len {v.shape[0]} != in_features {in_f}"
             )
         W_new = W32 - edit.strength * (W32 @ v).unsqueeze(1) * v.unsqueeze(0)
-    if edit.preserve_row_norm:
-        orig = torch.linalg.vector_norm(W32, dim=1, keepdim=True)
-        new = torch.linalg.vector_norm(W_new, dim=1, keepdim=True).clamp(min=1e-8)
+    if edit.preserve_projected_norm or edit.preserve_row_norm:
+        norm_dim = (0 if side == "output" else 1) if edit.preserve_projected_norm else 1
+        orig = torch.linalg.vector_norm(W32, dim=norm_dim, keepdim=True)
+        new = torch.linalg.vector_norm(W_new, dim=norm_dim, keepdim=True).clamp(
+            min=1e-8
+        )
         W_new = W_new * (orig / new)
     return W_new
 
@@ -259,6 +290,7 @@ def record_steering_plan(
     """
     kernel = config.steering.decay_kernel
     preserve = config.steering.weight_normalization != WeightNorm.NONE
+    preserve_projected = config.steering.weight_normalization == WeightNorm.PROJECTED
     direct_transform = getattr(
         config.steering, "direct_transform", DirectTransform.STANDARD
     )
@@ -312,6 +344,7 @@ def record_steering_plan(
                         preserve_row_norm=preserve,
                         projection_side=side,
                         direct_transform=DirectTransform(direct_transform).value,
+                        preserve_projected_norm=preserve_projected,
                     )
                 )
 
@@ -352,6 +385,7 @@ def record_steering_plan(
                         preserve_row_norm=preserve,
                         hidden_dim=int(v.shape[0]),
                         transposed=transposed,
+                        preserve_projected_norm=preserve_projected,
                     )
                 )
 
@@ -1066,6 +1100,8 @@ def save_plan(edits: list[TensorEdit], path: str | Path) -> None:
             "projection_side": e.projection_side,
             "direct_transform": e.direct_transform,
             "benign_dir": None if e.benign_dir is None else e.benign_dir.detach().cpu(),
+            **({"rows": list(e.rows)} if e.rows is not None else {}),
+            **({"preserve_projected_norm": True} if e.preserve_projected_norm else {}),
         }
         for e in edits
     ]

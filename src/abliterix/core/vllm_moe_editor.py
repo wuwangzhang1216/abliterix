@@ -817,6 +817,7 @@ def _worker_apply_ega_batch(
     worker: Any,
     plan: list[dict[str, Any]],
     norm_preserve: bool,
+    preserve_projected_norm: bool = False,
 ) -> dict[str, Any]:
     """Apply EGA projection to a batch of layers in one RPC.
 
@@ -909,11 +910,12 @@ def _worker_apply_ega_batch(
                 proj = torch.einsum("o,eoi->ei", vf, W_all)  # (E, d1)
                 W_new = W_all - strength * (vf.view(1, -1, 1) * proj.unsqueeze(1))
 
-            if norm_preserve:
-                orig_norms = torch.linalg.vector_norm(W_all, dim=-1, keepdim=True)
-                new_norms = torch.linalg.vector_norm(W_new, dim=-1, keepdim=True).clamp(
-                    min=1e-8
-                )
+            if preserve_projected_norm or norm_preserve:
+                norm_dim = (-1 if axis_is_in else -2) if preserve_projected_norm else -1
+                orig_norms = torch.linalg.vector_norm(W_all, dim=norm_dim, keepdim=True)
+                new_norms = torch.linalg.vector_norm(
+                    W_new, dim=norm_dim, keepdim=True
+                ).clamp(min=1e-8)
                 W_new = W_new * (orig_norms / new_norms)
 
             w2.data.copy_(W_new.to(w2.dtype))
@@ -1016,6 +1018,7 @@ class VLLMExpertEditor:
         self,
         plan: list[dict[str, Any]],
         norm_preserve: bool = True,
+        preserve_projected_norm: bool = False,
     ) -> dict[str, Any]:
         """Apply EGA projection for a trial.
 
@@ -1055,7 +1058,7 @@ class VLLMExpertEditor:
         try:
             results = self._rpc(
                 _worker_apply_ega_batch,
-                args=(plan, bool(norm_preserve)),
+                args=(plan, bool(norm_preserve), bool(preserve_projected_norm)),
             )
         except BaseException:
             self.restore()
@@ -1199,7 +1202,11 @@ def _worker_restore_attention(worker: Any) -> int:
 
 
 def _project_2d(
-    W: "torch.Tensor", vf: "torch.Tensor", strength: float, norm_preserve: bool
+    W: "torch.Tensor",
+    vf: "torch.Tensor",
+    strength: float,
+    norm_preserve: bool,
+    preserve_projected_norm: bool = False,
 ):
     """Apply ``_apply_direct_steering`` math on a 2-D weight slice.
 
@@ -1213,9 +1220,11 @@ def _project_2d(
     out_f, in_f = W32.shape
     v = vf
     if v.shape[0] == out_f:
+        axis_is_in = False
         proj = v @ W32  # (in_f,)
         W_new = W32 - strength * v.unsqueeze(1) * proj.unsqueeze(0)
     elif v.shape[0] == in_f:
+        axis_is_in = True
         proj = W32 @ v  # (out_f,)
         W_new = W32 - strength * proj.unsqueeze(1) * v.unsqueeze(0)
     else:
@@ -1223,9 +1232,12 @@ def _project_2d(
             f"v shape {v.shape[0]} matches neither axis of W ({out_f}, {in_f})"
         )
 
-    if norm_preserve:
-        orig_norms = torch.linalg.vector_norm(W32, dim=1, keepdim=True)
-        new_norms = torch.linalg.vector_norm(W_new, dim=1, keepdim=True).clamp(min=1e-8)
+    if preserve_projected_norm or norm_preserve:
+        norm_dim = (1 if axis_is_in else 0) if preserve_projected_norm else 1
+        orig_norms = torch.linalg.vector_norm(W32, dim=norm_dim, keepdim=True)
+        new_norms = torch.linalg.vector_norm(W_new, dim=norm_dim, keepdim=True).clamp(
+            min=1e-8
+        )
         W_new = W_new * (orig_norms / new_norms)
     W_new = torch.nan_to_num(W_new, nan=0.0, posinf=0.0, neginf=0.0)
     try:
@@ -1241,6 +1253,7 @@ def _worker_apply_attn_batch(
     worker: Any,
     plan: list[dict[str, Any]],
     norm_preserve: bool,
+    preserve_projected_norm: bool = False,
 ) -> dict[str, Any]:
     """Apply attention projection to a batch of (layer, component, v, strength).
 
@@ -1286,7 +1299,9 @@ def _worker_apply_attn_batch(
             vf = v.to(device=device, dtype=torch.float32)
             try:
                 with torch.no_grad():
-                    W_new = _project_2d(W, vf, strength, norm_preserve)
+                    W_new = _project_2d(
+                        W, vf, strength, norm_preserve, preserve_projected_norm
+                    )
                     attn.o_proj.weight.data.copy_(W_new)
                 applied += 1
                 per_layer.append((idx, component, (W.shape[0], W.shape[1])))
@@ -1321,7 +1336,9 @@ def _worker_apply_attn_batch(
         try:
             with torch.no_grad():
                 W_slice = qkv_w.data[lo:hi]
-                W_new = _project_2d(W_slice, vf, strength, norm_preserve)
+                W_new = _project_2d(
+                    W_slice, vf, strength, norm_preserve, preserve_projected_norm
+                )
                 qkv_w.data[lo:hi].copy_(W_new)
             applied += 1
             per_layer.append((idx, component, (hi - lo, int(qkv_w.shape[1]))))
@@ -1407,6 +1424,7 @@ class VLLMAttentionEditor:
         self,
         plan: list[dict[str, Any]],
         norm_preserve: bool = True,
+        preserve_projected_norm: bool = False,
     ) -> dict[str, Any]:
         """Apply attention projection for this trial.
 
@@ -1428,7 +1446,8 @@ class VLLMAttentionEditor:
         self._applied = True
         try:
             results = self._rpc(
-                _worker_apply_attn_batch, args=(plan, bool(norm_preserve))
+                _worker_apply_attn_batch,
+                args=(plan, bool(norm_preserve), bool(preserve_projected_norm)),
             )
         except BaseException:
             self.restore()

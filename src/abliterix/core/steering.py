@@ -367,7 +367,14 @@ def apply_steering(
         # Legacy top-N router suppression (complementary to EGA).
         if safety_experts and routing_config:
             _apply_moe_steering(
-                engine, steering_vectors, global_vector, safety_experts, routing_config
+                engine,
+                steering_vectors,
+                global_vector,
+                safety_experts,
+                routing_config,
+                router_suppression_mode=getattr(
+                    getattr(config, "experts", None), "router_suppression_mode", "scale"
+                ),
             )
         return
 
@@ -385,7 +392,14 @@ def apply_steering(
         # MoE expert steering still uses weight modification.
         if safety_experts and routing_config:
             _apply_moe_steering(
-                engine, steering_vectors, global_vector, safety_experts, routing_config
+                engine,
+                steering_vectors,
+                global_vector,
+                safety_experts,
+                routing_config,
+                router_suppression_mode=getattr(
+                    getattr(config, "experts", None), "router_suppression_mode", "scale"
+                ),
             )
         return
 
@@ -401,7 +415,14 @@ def apply_steering(
         )
         if safety_experts and routing_config:
             _apply_moe_steering(
-                engine, steering_vectors, global_vector, safety_experts, routing_config
+                engine,
+                steering_vectors,
+                global_vector,
+                safety_experts,
+                routing_config,
+                router_suppression_mode=getattr(
+                    getattr(config, "experts", None), "router_suppression_mode", "scale"
+                ),
             )
         return
 
@@ -419,7 +440,14 @@ def apply_steering(
         )
         if safety_experts and routing_config:
             _apply_moe_steering(
-                engine, steering_vectors, global_vector, safety_experts, routing_config
+                engine,
+                steering_vectors,
+                global_vector,
+                safety_experts,
+                routing_config,
+                router_suppression_mode=getattr(
+                    getattr(config, "experts", None), "router_suppression_mode", "scale"
+                ),
             )
         return
 
@@ -694,6 +722,9 @@ def apply_steering(
             routing_config,
             sv_by_device=sv_by_device,
             gv_by_device=gv_by_device,
+            router_suppression_mode=getattr(
+                getattr(config, "experts", None), "router_suppression_mode", "scale"
+            ),
         )
 
 
@@ -729,6 +760,9 @@ def _apply_direct_steering(
     kernel = config.steering.decay_kernel
     direct_transform = config.steering.direct_transform
     preserve_row_norm = config.steering.direct_transform_preserve_row_norm
+    preserve_projected_norm = (
+        config.steering.weight_normalization == WeightNorm.PROJECTED
+    )
 
     # Pre-compute per-layer benign direction (input space) once when an
     # advanced transform that needs the double-GS pre-step is selected.
@@ -836,9 +870,11 @@ def _apply_direct_steering(
                         Q, _ = torch.linalg.qr(V_layer.T)  # (in_f, rank)
                         # Subspace projection: W_new = W - strength * W @ Q @ Q^T
                         W_new = W - strength * (W @ Q) @ Q.T
+                        projected_axis_is_in = True
                     elif V_layer.shape[1] == out_f:
                         Q, _ = torch.linalg.qr(V_layer.T)  # (out_f, rank)
                         W_new = W - strength * Q @ (Q.T @ W)
+                        projected_axis_is_in = False
                     else:
                         continue
                 else:
@@ -882,6 +918,7 @@ def _apply_direct_steering(
                                 bdir,
                                 strength=strength,
                                 preserve_row_norm=preserve_row_norm,
+                                preserve_projected_norm=preserve_projected_norm,
                             )
                             weight.data = W_new.to(weight.dtype)
                             continue
@@ -892,20 +929,28 @@ def _apply_direct_steering(
                     if vf.shape[0] == out_f:
                         proj = vf @ W
                         W_new = W - strength * vf.unsqueeze(1) * proj.unsqueeze(0)
+                        projected_axis_is_in = False
                     elif vf.shape[0] == in_f:
                         proj = W @ vf
                         W_new = W - strength * proj.unsqueeze(1) * vf.unsqueeze(0)
+                        projected_axis_is_in = True
                     else:
                         # Dimension mismatch — skip this module.
                         continue
 
-                # Norm-preserving: restore original row magnitudes.
-                # Critical for double-norm architectures (Gemma 4) where
-                # row norm changes cascade through RMSNorm layers.
+                # Norm-preserving: restore original magnitudes.
+                # WeightNorm.PROJECTED rescales along the projected axis (columns
+                # for output-side, rows for input-side) so exact orthogonality
+                # v^T W_new == 0 is preserved; legacy FULL/PRE rescale dim=1.
                 if config.steering.weight_normalization != WeightNorm.NONE:
-                    orig_norms = torch.linalg.vector_norm(W, dim=1, keepdim=True)
+                    norm_dim = (
+                        (1 if projected_axis_is_in else 0)
+                        if preserve_projected_norm
+                        else 1
+                    )
+                    orig_norms = torch.linalg.vector_norm(W, dim=norm_dim, keepdim=True)
                     new_norms = torch.linalg.vector_norm(
-                        W_new, dim=1, keepdim=True
+                        W_new, dim=norm_dim, keepdim=True
                     ).clamp(min=1e-8)
                     W_new = W_new * (orig_norms / new_norms)
 
@@ -939,6 +984,9 @@ def _apply_ega_steering(
     """
     kernel = config.steering.decay_kernel
     norm_preserve = config.steering.weight_normalization != WeightNorm.NONE
+    preserve_projected_norm = (
+        config.steering.weight_normalization == WeightNorm.PROJECTED
+    )
 
     if not hasattr(engine, "_direct_weight_originals"):
         engine._direct_weight_originals = {}
@@ -1014,6 +1062,7 @@ def _apply_ega_steering(
             strength=strength,
             axis_is_in=axis_is_in,
             preserve_row_norm=norm_preserve,
+            preserve_projected_norm=preserve_projected_norm,
         )
         fused.data.copy_(W_new.to(fused.dtype))
         del W_new
@@ -1200,6 +1249,9 @@ def _apply_direct_steering_vllm(
     """
     kernel = config.steering.decay_kernel
     norm_preserve = config.steering.weight_normalization != WeightNorm.NONE
+    preserve_projected_norm = (
+        config.steering.weight_normalization == WeightNorm.PROJECTED
+    )
 
     plan: list[dict] = []
     for layer_idx in range(n_layers):
@@ -1232,7 +1284,11 @@ def _apply_direct_steering_vllm(
 
     if not plan:
         return {"applied": 0, "errors": [], "per_layer": []}
-    return vllm_gen.apply_attention_projection(plan, norm_preserve=norm_preserve)
+    return vllm_gen.apply_attention_projection(
+        plan,
+        norm_preserve=norm_preserve,
+        preserve_projected_norm=preserve_projected_norm,
+    )
 
 
 def _apply_ega_steering_vllm(
@@ -1253,6 +1309,9 @@ def _apply_ega_steering_vllm(
 
     kernel = config.steering.decay_kernel
     norm_preserve = config.steering.weight_normalization != WeightNorm.NONE
+    preserve_projected_norm = (
+        config.steering.weight_normalization == WeightNorm.PROJECTED
+    )
 
     plan: list[dict] = []
     for layer_idx in range(n_layers):
@@ -1279,7 +1338,11 @@ def _apply_ega_steering_vllm(
 
     if not plan:
         return {"applied": 0, "errors": [], "per_layer": []}
-    return vllm_gen.apply_ega_projection(plan, norm_preserve=norm_preserve)
+    return vllm_gen.apply_ega_projection(
+        plan,
+        norm_preserve=norm_preserve,
+        preserve_projected_norm=preserve_projected_norm,
+    )
 
 
 def apply_steering_vllm_inplace(
@@ -1677,6 +1740,7 @@ def _apply_moe_steering(
     *,
     sv_by_device: dict | None = None,
     gv_by_device: dict | None = None,
+    router_suppression_mode: str = "scale",
 ):
     """Apply router-weight suppression and fused-expert abliteration."""
     n_suppress = routing_config.n_suppress
@@ -1716,12 +1780,27 @@ def _apply_moe_steering(
         # (A) Router-weight suppression
         gate = engine._locate_router(layer)
         if gate is not None and bias_value < 0:
-            scale = max(0.0, 1.0 + bias_value / 10.0)
-            for eid, _ in top:
-                engine._router_originals.append(
-                    (layer_idx, eid, gate.weight.data[eid].clone())
-                )
-                gate.weight.data[eid] *= scale
+            if router_suppression_mode == "directional":
+                alpha = min(2.0, max(0.0, -bias_value / 10.0))
+                v_hat = v.to(device=gate.weight.device, dtype=torch.float32)
+                v_hat = v_hat / torch.linalg.vector_norm(v_hat).clamp(min=1e-8)
+                for eid, _ in top:
+                    engine._router_originals.append(
+                        (layer_idx, eid, gate.weight.data[eid].clone())
+                    )
+                    row = gate.weight.data[eid].to(torch.float32)
+                    if row.shape[0] == v_hat.shape[0]:
+                        row = row - alpha * torch.dot(row, v_hat) * v_hat
+                        gate.weight.data[eid] = row.to(gate.weight.dtype)
+                    else:
+                        gate.weight.data[eid] *= max(0.0, 1.0 + bias_value / 10.0)
+            else:
+                scale = max(0.0, 1.0 + bias_value / 10.0)
+                for eid, _ in top:
+                    engine._router_originals.append(
+                        (layer_idx, eid, gate.weight.data[eid].clone())
+                    )
+                    gate.weight.data[eid] *= scale
 
         # (B) Fused-expert down-projection steering
         fused = engine._locate_fused_weights(layer)
