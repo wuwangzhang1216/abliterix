@@ -1609,14 +1609,26 @@ class SteeringEngine:
         self,
         benign_msgs: list[Any],
         target_msgs: list[Any],
+        *,
+        tail_tokens: int | None = None,
     ) -> dict[int, list[tuple[int, float]]]:
         """Profile router activations to rank experts by safety association.
 
-        Hooks each MoE gate to record which experts are selected for every
+        Hooks each MoE gate to record which experts are selected for each
         token, then computes per-expert risk-difference scores.
+
+        When ``tail_tokens > 0`` (or ``config.experts.profiling_tail_tokens > 0``),
+        only the last ``tail_tokens`` positions of each sequence in a batch are
+        counted — focusing on the assistant-turn decision boundary instead of
+        diluting safety-expert scores across long prompt prefixes.
 
         Returns ``{layer_idx: [(expert_idx, score), ...]}`` sorted descending.
         """
+        if tail_tokens is None:
+            cfg = getattr(self, "config", None)
+            tail_tokens = int(
+                getattr(getattr(cfg, "experts", None), "profiling_tail_tokens", 0)
+            )
         layers = self.transformer_layers
         gates: dict[int, Module] = {}
         for idx in range(len(layers)):
@@ -1643,6 +1655,19 @@ class SteeringEngine:
                     selected = extract_router_expert_ids(
                         out, top_k=getattr(module, "top_k", 8)
                     )
+                    if tail_tokens > 0:
+                        if selected.dim() == 3:
+                            selected = selected[:, -tail_tokens:, :]
+                        elif selected.dim() == 2:
+                            x0 = inp[0] if isinstance(inp, tuple) and inp else inp
+                            if isinstance(x0, torch.Tensor) and x0.dim() == 3:
+                                bsz, seqlen = x0.shape[0], x0.shape[1]
+                                if selected.shape[0] == bsz * seqlen:
+                                    selected = selected.reshape(
+                                        bsz, seqlen, selected.shape[-1]
+                                    )[:, -tail_tokens:, :]
+                            elif selected.shape[0] > tail_tokens:
+                                selected = selected[-tail_tokens:, :]
 
                     flat = selected.reshape(-1)
                     k = getattr(module, "top_k", selected.shape[-1])

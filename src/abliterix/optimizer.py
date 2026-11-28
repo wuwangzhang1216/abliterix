@@ -213,11 +213,12 @@ def run_search(
                 hi,
             )
             max_w = max(0.0, sampled_max_w) if auto_disable else sampled_max_w
-            pos_lo = 0.4 * last_layer if last_layer < 20 else 0.6 * last_layer
+            pos_lo = config.steering.position_range[0] * last_layer
+            pos_hi = config.steering.position_range[1] * last_layer
             peak_pos = trial.suggest_float(
                 f"{component}.max_weight_position",
                 pos_lo,
-                1.0 * last_layer,
+                pos_hi,
             )
             # min_weight expressed as a fraction of max_weight
             # (multivariate TPE needs fixed-range parameters). The upper bound

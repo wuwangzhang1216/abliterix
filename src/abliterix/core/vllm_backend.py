@@ -664,6 +664,7 @@ class VLLMGenerator:
         self,
         plan: list[dict[str, Any]],
         norm_preserve: bool = True,
+        preserve_projected_norm: bool = False,
     ) -> dict[str, Any]:
         """Project the refusal direction out of every expert's down_proj
         for the layers listed in ``plan``.
@@ -680,7 +681,11 @@ class VLLMGenerator:
         """
         if getattr(self, "expert_editor", None) is None:
             return {"applied": 0, "errors": ["no expert editor"], "per_layer": []}
-        result = self.expert_editor.apply_ega(plan, norm_preserve=norm_preserve)
+        result = self.expert_editor.apply_ega(
+            plan,
+            norm_preserve=norm_preserve,
+            preserve_projected_norm=preserve_projected_norm,
+        )
         if result.get("applied", 0) > 0:
             try:
                 self.llm.reset_prefix_cache()
@@ -720,6 +725,7 @@ class VLLMGenerator:
         self,
         plan: list[dict[str, Any]],
         norm_preserve: bool = True,
+        preserve_projected_norm: bool = False,
     ) -> dict[str, Any]:
         """Project the refusal direction out of attention projections for the
         layers/components listed in ``plan``.
@@ -732,7 +738,11 @@ class VLLMGenerator:
         """
         if getattr(self, "attention_editor", None) is None:
             return {"applied": 0, "errors": ["no attention editor"], "per_layer": []}
-        result = self.attention_editor.apply(plan, norm_preserve=norm_preserve)
+        result = self.attention_editor.apply(
+            plan,
+            norm_preserve=norm_preserve,
+            preserve_projected_norm=preserve_projected_norm,
+        )
         if result.get("applied", 0) > 0:
             try:
                 self.llm.reset_prefix_cache()

@@ -1179,8 +1179,25 @@ class SteeringConfig(BaseModel):
         ),
     )
 
+    position_range: list[float] = Field(
+        default=[0.3, 1.0],
+        description=(
+            "Fractional layer range [lo, hi] of last_layer searched for each "
+            "component's max_weight_position. Default [0.3, 1.0] lets Optuna "
+            "reach early-to-mid refusal circuits on deep (>= 20-layer) models "
+            "instead of forcing all peaks into the final 40% of layers."
+        ),
+    )
+
     @model_validator(mode="after")
     def _validate_steering_combos(self) -> "SteeringConfig":
+        if len(self.position_range) != 2 or not (
+            0.0 <= self.position_range[0] < self.position_range[1] <= 1.0
+        ):
+            raise ValueError(
+                "position_range must be a 2-element list [lo, hi] with "
+                f"0.0 <= lo < hi <= 1.0, got {self.position_range}."
+            )
         if self.vector_method == VectorMethod.SAE:
             if not self.sae_path:
                 raise ValueError(
@@ -1585,6 +1602,29 @@ class ExpertConfig(BaseModel):
             "experts (rewards low harmful-prompt activation variance).  "
             "Defaults to 1.0 per the paper recipe.  Ignored when "
             "profiling_method = 'standard'."
+        ),
+    )
+
+    router_suppression_mode: Literal["scale", "directional"] = Field(
+        default="scale",
+        description=(
+            "How router rows of top-N safety experts are edited. 'scale' "
+            "multiplies each selected row globally by max(0, 1 + router_bias / 10). "
+            "'directional' projects out only the refusal-direction component from "
+            "each selected router row (w_e <- w_e - alpha * (w_e . v_hat) * v_hat), "
+            "preserving benign routing through the same experts."
+        ),
+    )
+
+    profiling_tail_tokens: int = Field(
+        default=0,
+        ge=0,
+        description=(
+            "Number of trailing (decision-boundary) prompt tokens per sequence "
+            "used to profile safety-expert routing frequency in "
+            "identify_safety_experts. 0 averages over all tokens (legacy); "
+            "small values (e.g. 1-4) focus on the assistant-turn decision tokens "
+            "instead of diluting across long prompt prefixes."
         ),
     )
 
