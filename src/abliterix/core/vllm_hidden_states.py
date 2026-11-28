@@ -58,6 +58,14 @@ _SUPPORTED_MODEL_TYPES = {
 }
 
 
+def _config_json(model_id: str, revision: str | None = None) -> dict[str, Any]:
+    path = os.path.join(model_id, "config.json")
+    if not os.path.isfile(path):
+        path = hf_hub_download(model_id, "config.json", revision=revision)
+    with open(path, encoding="utf-8") as f:
+        return json.load(f)
+
+
 def _load_text_config_data(
     model_id: str,
     trust_remote_code: bool,
@@ -78,11 +86,15 @@ def _load_text_config_data(
         if "does not recognize this architecture" not in str(exc):
             raise
 
-    cfg_path = hf_hub_download(model_id, "config.json", revision=revision)
-    with open(cfg_path, encoding="utf-8") as f:
-        cfg = json.load(f)
+    cfg = _config_json(model_id, revision)
     text_cfg = cfg.get("text_config") or cfg
     return text_cfg
+
+
+def _top_level_model_type(config: AbliterixConfig) -> str:
+    return _config_json(config.model.model_id, config.model.revision).get(
+        "model_type", ""
+    )
 
 
 def is_model_supported(config: AbliterixConfig) -> bool:
@@ -94,7 +106,12 @@ def is_model_supported(config: AbliterixConfig) -> bool:
             config.model.revision,
         )
         model_type = text_cfg.get("model_type", "")
-        return model_type in _SUPPORTED_MODEL_TYPES
+        if model_type in _SUPPORTED_MODEL_TYPES:
+            return True
+        # Multimodal configs may omit model_type on text_config and set it at top level.
+        return (
+            not model_type and _top_level_model_type(config) in _SUPPORTED_MODEL_TYPES
+        )
     except Exception:
         return False
 
@@ -116,6 +133,50 @@ def _load_hidden_states_file(path: str) -> Tensor:
     # Import and loader failures must propagate rather than bypassing the lock.
     with safe_open(path, "pt") as f:
         return f.get_tensor("hidden_states")
+
+
+def aux_layer_ids(num_layers: int) -> list[int]:
+    """The ``eagle_aux_hidden_state_layer_ids`` to request: ``1..N``.
+
+    vLLM's aux id ``k`` is the residual stream after ``k`` decoder layers
+    (e.g. llama and gemma4 capture id ``k + 1`` after layer ``k``), which is
+    HF's ``hidden_states[k]``. Id 0, the embeddings, is left out: HF steering
+    never uses it and we keep index 0 a zero placeholder."""
+    return list(range(1, num_layers + 1))
+
+
+def layer_rows(hs: Tensor, num_layers: int, token_offset: int = -1) -> Tensor:
+    """One prompt's connector tensor to ``[N + 1, hidden]`` indexed like HF's
+    ``hidden_states``: row 0 a zero placeholder for the embeddings, row ``k``
+    the state after ``k`` layers (aux id ``k``, see :func:`aux_layer_ids`).
+
+    The connector stores ``[prompt_len, N, hidden]`` (observed on gpt-oss /
+    vLLM 0.19); older builds stored ``[N, prompt_len, hidden]``. The layer
+    axis is the one of length ``N``."""
+    if hs.dim() != 3:
+        raise RuntimeError(
+            f"Expected 3-D hidden_states tensor, got shape {list(hs.shape)}"
+        )
+    if hs.shape[1] == num_layers:
+        layer_vecs = hs[token_offset, :, :]
+    elif hs.shape[0] == num_layers:
+        layer_vecs = hs[:, token_offset, :]
+    elif num_layers - 1 in (hs.shape[0], hs.shape[1]):
+        # Models that capture id k before layer k (deepseek_v2 in vLLM
+        # 0.20) never reach id N; refuse rather than shift the layers.
+        raise RuntimeError(
+            f"hidden_states shape {list(hs.shape)} has {num_layers - 1} layers "
+            f"of {num_layers}: this vLLM model does not capture the state "
+            "after its last layer."
+        )
+    else:
+        raise RuntimeError(
+            f"Unexpected hidden_states shape {list(hs.shape)} "
+            f"(num_layers={num_layers}); neither dim 0 nor dim 1 "
+            f"matches the layer count."
+        )
+    placeholder = torch.zeros(1, layer_vecs.shape[1], dtype=layer_vecs.dtype)
+    return torch.cat([placeholder, layer_vecs], dim=0)
 
 
 def extract_hidden_states_vllm(
@@ -165,8 +226,7 @@ def extract_hidden_states_vllm(
     # models may not exist in the installed Transformers registry yet.
     text_cfg = _load_text_config_data(model_id, trust, config.model.revision)
     num_layers = text_cfg["num_hidden_layers"]
-    # Extract ALL layers.
-    layer_ids = list(range(num_layers))
+    layer_ids = aux_layer_ids(num_layers)
 
     print(f"* Loading model in vLLM with TP={tp} for hidden state extraction...")
 
@@ -310,40 +370,7 @@ def extract_hidden_states_vllm(
 
             hs = _load_hidden_states_file(hs_path)
 
-            # vLLM's ExampleHiddenStatesConnector stores hidden states as
-            # [prompt_len, num_layers, hidden_dim] — NOT [num_layers, prompt_len,
-            # hidden_dim] as earlier versions of this file assumed.  The wrong
-            # ordering caused torch.stack across prompts to fail with
-            # "stack expects equal size, got [180, 2880] and [113, 2880]"
-            # (the varying 1st dim was prompt_len, not num_layers).
-            # Auto-detect which axis is the layer axis by finding the one whose
-            # length matches our known num_layers; fall back to the
-            # prompt_len-first interpretation since that's what we've observed
-            # on gpt-oss / vLLM 0.19.
-            if hs.dim() == 3:
-                if hs.shape[0] == num_layers:
-                    # [num_layers, prompt_len, hidden_dim] — original assumption.
-                    layer_vecs = hs[:, token_offset, :]
-                elif hs.shape[1] == num_layers:
-                    # [prompt_len, num_layers, hidden_dim] — observed on gpt-oss.
-                    layer_vecs = hs[token_offset, :, :]
-                else:
-                    raise RuntimeError(
-                        f"Unexpected hidden_states shape {list(hs.shape)} "
-                        f"(num_layers={num_layers}); neither dim 0 nor dim 1 "
-                        f"matches the layer count."
-                    )
-            else:
-                raise RuntimeError(
-                    f"Expected 3-D hidden_states tensor, got shape {list(hs.shape)}"
-                )
-
-            # Prepend zeros for embedding layer (index 0).
-            hidden_dim = layer_vecs.shape[1]
-            embedding_placeholder = torch.zeros(1, hidden_dim, dtype=layer_vecs.dtype)
-            batch_residuals.append(
-                torch.cat([embedding_placeholder, layer_vecs], dim=0)
-            )
+            batch_residuals.append(layer_rows(hs, num_layers, token_offset))
 
         residuals = torch.stack(batch_residuals, dim=0).to(torch.float32)
 
